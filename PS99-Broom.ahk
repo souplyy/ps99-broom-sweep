@@ -11,6 +11,7 @@ global hudHits := 0, hudMissingAt := 0, lobbyHits := 0, returnHits := 0
 global returnLeftAt := 0, lobbyStableAt := 0, controllerLog := ""
 global lastLobbyClick := 0, lobbyClickAttempts := 0
 global entryHits := 0, entryAttempts := 0
+global focusPaused := false, focusPauseAt := 0, focusRetryAt := 0, focusAttempts := 0, focusActiveAt := 0
 global helperDir := A_ScriptDir "\masquerade"
 OnExit Cleanup
 
@@ -21,7 +22,7 @@ global status := panel.AddText("xm w350", "Status: Off")
 panel.AddText("xm w350", "Start from the same lobby and camera position.")
 panel.AddButton("xm w170 h34", "Start / stop (F6)").OnEvent("Click", Toggle)
 panel.AddButton("x+10 w170 h34", "Update / reload").OnEvent("Click", UpdateAndReload)
-panel.AddText("xm w350", "Keep Roblox focused. F8 exits.")
+panel.AddText("xm w350", "Auto-refocus enabled. F8 exits.")
 panel.OnEvent("Close", (*) => ExitApp())
 panel.Show()
 F6::Toggle()
@@ -72,6 +73,7 @@ Toggle(*) {
 
 Start() {
     global running, phase, helperPid, hwnd, phaseAt, lastSeq, freshAt, controllerLog, entryHits, entryAttempts
+    global focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt
     hwnd := WinExist("ahk_exe RobloxPlayerBeta.exe")
     python := A_ScriptDir "\runtime\python\pythonw.exe"
     if !FileExist(python)
@@ -95,6 +97,7 @@ Start() {
         Run '"' python '" "' helper '" ' hwnd, helperDir, "Hide", &helperPid
         running := true, phase := "entry", phaseAt := A_TickCount
         entryHits := 0, entryAttempts := 0
+        focusPaused := false, focusPauseAt := 0, focusRetryAt := 0, focusAttempts := 0, focusActiveAt := 0
         controllerLog := helperDir "\controller-" FormatTime(, "yyyyMMdd-HHmmss") "-" DllCall("GetCurrentProcessId") ".log"
         LogEvent("start", "hwnd=" hwnd " helper=" helperPid)
         freshAt := A_TickCount, lastSeq := ""
@@ -115,14 +118,71 @@ LogEvent(event, detail := "") {
 Tick() {
     global phase, phaseAt, lastSeq, freshAt, lastCue, lastCueAt
     global hudHits, hudMissingAt, lobbyHits, returnHits, returnLeftAt, lobbyStableAt, lastLobbyClick, lobbyClickAttempts
-    global entryHits, entryAttempts
+    global entryHits, entryAttempts, focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt
     if !running
         return
-    if !WinActive("ahk_id " hwnd) || !ProcessExist(helperPid) {
-        Stop("Focus or detector lost")
+    if !ProcessExist(helperPid) {
+        Stop("Detector process stopped")
         return
     }
     now := A_TickCount
+    if !WinActive("ahk_id " hwnd) {
+        focusActiveAt := 0
+        if !focusPaused {
+            focusPaused := true, focusPauseAt := now, focusRetryAt := now+1000, focusAttempts := 0
+            SendEvent "{d up}{a up}{w up}{s up}{Space up}{t up}"
+            LogEvent("focus_paused", "movement released")
+        }
+        if focusAttempts < 3 && now >= focusRetryAt {
+            focusAttempts += 1, focusRetryAt := now+2000
+            try WinActivate "ahk_id " hwnd
+            LogEvent("focus_retry", "attempt=" focusAttempts)
+        }
+        status.Text := focusAttempts < 3 ? "Status: Paused; trying to refocus Roblox" : "Status: Paused; focus Roblox to resume"
+        return
+    }
+    ; A stale unfocused observation must not restart movement or trip the watchdog.
+    if focusPaused {
+        if !focusActiveAt
+            focusActiveAt := now
+        data := ""
+        try data := Trim(FileRead(helperDir "\observation.txt", "UTF-8"))
+        if !RegExMatch(data, "^(\d+)\|(none|jump|dive)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)$", &resume) || resume[1] = lastSeq {
+            if now-focusActiveAt > 10000 {
+                focusPaused := false
+                Stop("Detector did not recover after focus returned")
+            }
+            return
+        }
+        pausedMs := now-focusPauseAt
+        ; Movement timers count only time when their keys were actually held.
+        if phase = "entry" || phase = "entry_search_w" || phase = "entry_search_s" || phase = "entry_search_center"
+            phaseAt += pausedMs
+        if hudMissingAt
+            hudMissingAt += pausedMs
+        if returnLeftAt
+            returnLeftAt += pausedMs
+        if lobbyStableAt
+            lobbyStableAt += pausedMs
+        if lastLobbyClick
+            lastLobbyClick += pausedMs
+        freshAt := now, lastSeq := "", focusPaused := false
+        LogEvent("focus_resumed", "paused_ms=" pausedMs " attempts=" focusAttempts)
+        ; If the scene changed during a long absence, wait for the game instead
+        ; of sending movement in an unknown location.
+        movement := phase = "entry" || phase = "entry_search_w" || phase = "entry_search_s" || phase = "entry_search_center"
+        lobbyView := Integer(resume[5]) > 8000 && Integer(resume[6]) < 600 && Integer(resume[7]) < 120 && Integer(resume[10]) < 12000
+        if movement && pausedMs > 3000 && !lobbyView {
+            phase := "waiting", phaseAt := now, hudHits := 0
+            LogEvent("focus_scene_changed", "movement cancelled; watching game")
+        } else if phase = "entry"
+            SendEvent "{d down}"
+        else if phase = "entry_search_s"
+            SendEvent "{s down}"
+        else if phase = "entry_search_w" || phase = "entry_search_center"
+            SendEvent "{w down}"
+        status.Text := "Status: Focus recovered; resuming"
+    }
     if phase = "entry" && now-phaseAt >= 7500 {
         SendEvent "{d up}"
         phase := "entry_check", phaseAt := now
@@ -166,7 +226,7 @@ Tick() {
             return
         }
         if m[2] = "unfocused" {
-            Stop("Roblox lost focus")
+            ; The detector can report the previous frame after focus returns.
             return
         }
         freshAt := now
@@ -316,15 +376,13 @@ ClickLobbyButton(redCount) {
     ; relying on the visible Windows pointer changing position alone.
     if !MoveByRelativeInput(clickX, clickY) {
         LogEvent("lobby_click_cancelled", "reason=relative_move_failed")
-        if running
+        if running && WinActive("ahk_id " hwnd)
             Stop("Could not move mouse to Lobby")
         return false
     }
     Sleep 250
     if !running || !WinActive("ahk_id " hwnd) {
         LogEvent("lobby_click_cancelled", "reason=focus_or_stop")
-        if running
-            Stop("Focus lost before Lobby click")
         return false
     }
     MouseGetPos &actualX, &actualY
