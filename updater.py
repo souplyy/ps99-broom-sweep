@@ -12,6 +12,8 @@ import re
 import tempfile
 import urllib.request
 import zipfile
+import subprocess
+import sys
 
 ROOT=Path(__file__).resolve().parent
 CONFIG=ROOT/'version.json'
@@ -99,6 +101,43 @@ def main():
     log('Updated to '+version)
 
 
+def wait_for_process(pid):
+    kernel=ctypes.windll.kernel32
+    kernel.OpenProcess.argtypes=[ctypes.c_uint32,ctypes.c_int,ctypes.c_uint32]
+    kernel.OpenProcess.restype=ctypes.c_void_p
+    kernel.WaitForSingleObject.argtypes=[ctypes.c_void_p,ctypes.c_uint32]
+    kernel.WaitForSingleObject.restype=ctypes.c_uint32
+    kernel.CloseHandle.argtypes=[ctypes.c_void_p]
+    handle=kernel.OpenProcess(0x00100000,False,pid)
+    if not handle:
+        return True
+    try:
+        return kernel.WaitForSingleObject(handle,15000)==0
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def run():
+    reload_args=sys.argv[1:]
+    if reload_args:
+        if len(reload_args)!=4 or reload_args[0]!='--reload' or not reload_args[1].isdigit():
+            raise ValueError('Invalid reload arguments')
+        if not wait_for_process(int(reload_args[1])):
+            log('Original macro did not exit; update cancelled.')
+            return
+    try:
+        main()
+    except Exception as exc:
+        log('Update check failed: '+repr(exc))
+    finally:
+        if reload_args:
+            ahk,script=map(Path,reload_args[2:])
+            if script.resolve() != (ROOT/'PS99-Broom.ahk').resolve() or not ahk.is_file():
+                log('Cannot reopen: invalid script or AutoHotkey path.')
+            else:
+                subprocess.Popen([str(ahk),str(script)],cwd=str(ROOT))
+
+
 if __name__=='__main__':
-    try: main()
-    except Exception as exc: log('Update check failed: '+repr(exc))
+    try: run()
+    except Exception as exc: log('Update launcher failed: '+repr(exc))

@@ -20,12 +20,32 @@ panel.AddText("w350", "Broom Sweep: wait for entry, then react to cues")
 global status := panel.AddText("xm w350", "Status: Off")
 panel.AddText("xm w350", "Start from the same lobby and camera position.")
 panel.AddButton("xm w170 h34", "Start / stop (F6)").OnEvent("Click", Toggle)
-panel.AddButton("x+10 w170 h34", "Update / reload").OnEvent("Click", (*) => Reload())
+panel.AddButton("x+10 w170 h34", "Update / reload").OnEvent("Click", UpdateAndReload)
 panel.AddText("xm w350", "Keep Roblox focused. F8 exits.")
 panel.OnEvent("Close", (*) => ExitApp())
 panel.Show()
 F6::Toggle()
 F8::ExitApp()
+
+UpdateAndReload(*) {
+    python := A_ScriptDir "\runtime\python\pythonw.exe"
+    if !FileExist(python)
+        python := EnvGet("USERPROFILE") "\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\pythonw.exe"
+    updater := A_ScriptDir "\updater.py"
+    config := A_ScriptDir "\version.json"
+    if !FileExist(python) || !FileExist(updater) || !FileExist(config) {
+        MsgBox "The update checker is missing. Keep updater.py and version.json beside the macro."
+        return
+    }
+    try {
+        pid := DllCall("GetCurrentProcessId")
+        Run '"' python '" "' updater '" --reload ' pid ' "' A_AhkPath '" "' A_ScriptFullPath '"', A_ScriptDir, "Hide"
+        ; Exit releases keys and stops the detector before files are replaced.
+        ExitApp()
+    } catch Error as e {
+        MsgBox "Could not start the update checker: " e.Message
+    }
+}
 
 Toggle(*) {
     if running
