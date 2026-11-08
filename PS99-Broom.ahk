@@ -6,7 +6,7 @@ SetKeyDelay -1, 25
 Thread "Interrupt", 0
 
 global running := false, phase := "off", helperPid := 0, hwnd := 0, runGeneration := 0
-global gamesPlayed := 0
+global gamesPlayed := 0, updateCheckPid := 0
 global phaseAt := 0, lastSeq := "", freshAt := 0, lastCue := "", lastCueAt := 0
 global hudHits := 0, hudMissingAt := 0, lobbyHits := 0, returnHits := 0
 global returnLeftAt := 0, lobbyStableAt := 0, controllerLog := ""
@@ -28,10 +28,15 @@ try magnetSaved := IniRead(A_ScriptDir "\settings.ini", "Options", "TreatMagnet"
 global magnetCheck := panel.AddCheckbox("xm w350 Checked" (magnetSaved = 1 ? 1 : 0), "Use Treat Magnet when ready")
 magnetCheck.OnEvent("Click", MagnetOptionChanged)
 panel.AddButton("xm w170 h34", "Start / stop (F6)").OnEvent("Click", Toggle)
-panel.AddButton("x+10 w170 h34", "Update / reload").OnEvent("Click", UpdateAndReload)
+global updateButton := panel.AddButton("x+10 w170 h34", "Update / reload")
+updateButton.OnEvent("Click", UpdateAndReload)
 panel.AddText("xm w350", "Auto-refocus enabled. F8 exits.")
 panel.OnEvent("Close", (*) => ExitApp())
 panel.Show()
+; Check shortly after launch and then every ten minutes without interrupting play.
+SetTimer InitialUpdateCheck, -5000, -1
+SetTimer BackgroundUpdateCheck, 600000, -1
+SetTimer RefreshUpdateNotice, 2000, -1
 F6::Toggle()
 F8::ExitApp()
 
@@ -42,6 +47,32 @@ InstalledVersion() {
             return "v" match[1]
     }
     return "version unknown"
+}
+
+InitialUpdateCheck() {
+    BackgroundUpdateCheck()
+}
+
+BackgroundUpdateCheck() {
+    global updateCheckPid
+    if updateCheckPid && ProcessExist(updateCheckPid)
+        return
+    python := A_ScriptDir "\runtime\python\pythonw.exe"
+    if !FileExist(python)
+        python := EnvGet("USERPROFILE") "\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\pythonw.exe"
+    updater := A_ScriptDir "\updater.py"
+    if !FileExist(python) || !FileExist(updater)
+        return
+    try Run '"' python '" "' updater '" --check-only', A_ScriptDir, "Hide", &updateCheckPid
+}
+
+RefreshUpdateNotice() {
+    result := ""
+    try result := Trim(FileRead(A_ScriptDir "\update-available.txt", "UTF-8"))
+    if RegExMatch(result, "^(\d+\.\d+\.\d+)\|(\d+\.\d+\.\d+)$", &match) && "v" match[1] = InstalledVersion()
+        updateButton.Text := "Update available!"
+    else
+        updateButton.Text := "Update / reload"
 }
 
 UpdateAndReload(*) {

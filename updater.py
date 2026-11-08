@@ -63,6 +63,27 @@ def log(message):
         pass
 
 
+def check_only():
+    """Read release metadata only; never modify or interrupt the running macro."""
+    settings=json.loads(CONFIG.read_text(encoding='utf8'))
+    repository=settings.get('repository','')
+    current=settings.get('version','')
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',repository):
+        raise ValueError('Update source not configured')
+    if not re.fullmatch(r'\d+\.\d+\.\d+',current):
+        raise ValueError('Installed version is invalid')
+    release=json.loads(fetch('https://api.github.com/repos/'+repository+'/releases/latest',1024*1024))
+    latest=release.get('tag_name','').lstrip('v')
+    if not re.fullmatch(r'\d+\.\d+\.\d+',latest):
+        raise ValueError('Release tag must be a numeric version')
+    available=latest if tuple(map(int,latest.split('.'))) > tuple(map(int,current.split('.'))) else ''
+    target=ROOT/'update-available.txt'
+    temp=ROOT/'update-available.tmp'
+    temp.write_text(current+'|'+available,encoding='ascii')
+    os.replace(temp,target)
+    log('Background update check: '+('v'+available+' available' if available else 'up to date'))
+
+
 def main():
     settings=json.loads(CONFIG.read_text(encoding='utf8'))
     repository=settings.get('repository','')
@@ -142,6 +163,12 @@ def wait_for_process(pid):
 
 def run():
     reload_args=sys.argv[1:]
+    if reload_args == ['--check-only']:
+        try:
+            check_only()
+        except Exception as exc:
+            log('Background update check failed: '+repr(exc))
+        return
     if reload_args:
         if len(reload_args)!=4 or reload_args[0]!='--reload' or not reload_args[1].isdigit():
             raise ValueError('Invalid reload arguments')
