@@ -6,8 +6,8 @@ from PIL import Image
 ROOT=Path(__file__).resolve().parent
 
 
-def color_mask(image, kind):
-    a=np.asarray(image.convert('RGB'),dtype=np.int16)
+def color_mask(image, kind, step=1):
+    a=np.asarray(image.convert('RGB'))[::step,::step].astype(np.int16)
     r,g,b=a[:,:,0],a[:,:,1],a[:,:,2]
     if kind=='jump':
         return (r>=205)&(g>=85)&(g<=185)&(b<=105)&(r-g>=45)
@@ -32,7 +32,7 @@ def detect(image, source_aspect=None):
     x_scale = max(.6, min(1.65, (960/515) / aspect))
     values={}
     for kind,template in TEMPLATES.items():
-        mask=color_mask(frame,kind)[::2,::2]
+        mask=color_mask(frame,kind,step=2)
         if abs(x_scale-1.0) > .025:
             template = np.asarray(Image.fromarray(template.astype(np.uint8)*255).resize(
                 (max(1, round(template.shape[1]*x_scale)), template.shape[0]), Image.Resampling.NEAREST)) > 0

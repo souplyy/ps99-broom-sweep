@@ -28,20 +28,20 @@ def entry_confirmation(image):
     green[440:,400:560]=False
     green[:, :10]=False
     green[:, 950:]=False
-    for y in range(12,500):
-        row=green[y]
-        starts=np.flatnonzero(row & ~np.r_[False,row[:-1]])
-        ends=np.flatnonzero(row & ~np.r_[row[1:],False])
-        for x0,x1 in zip(starts,ends):
-            if x1-x0+1 < 12:
-                continue
-            # Limit the sample to one short section, as long lines may cross
-            # over characters or different background colors.
-            x1=min(x1,x0+35)
-            above=purple[max(0,y-12):max(0,y-3),x0:x1+1]
-            below=purple[min(515,y+5):min(515,y+15),x0:x1+1]
-            if above.size and below.size and above.mean()>=.25 and below.mean()>=.25:
-                return 1.0
+    # Find candidate horizontal runs in one array operation; inspect only
+    # those runs instead of looping through every pixel row in Python.
+    padded=np.pad(green[12:500],((0,0),(1,1)),constant_values=False)
+    starts_y,starts_x=np.nonzero(padded[:,1:] & ~padded[:,:-1])
+    ends_y,ends_x=np.nonzero(padded[:,:-1] & ~padded[:,1:])
+    for row,x0,endrow,xend in zip(starts_y,starts_x,ends_y,ends_x):
+        if row != endrow or xend-x0 < 12:
+            continue
+        y=int(row)+12
+        x1=min(int(xend),int(x0)+36)
+        above=purple[y-12:y-3,x0:x1]
+        below=purple[y+5:min(515,y+15),x0:x1]
+        if above.size and below.size and above.mean()>=.25 and below.mean()>=.25:
+            return 1.0
     return 0.0
 
 
@@ -76,7 +76,8 @@ def main():
     user.GetWindowRect.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.RECT)]
     output=ROOT/'observation.txt'; temporary=ROOT/'observation.tmp'
     stop=ROOT/'stop.request'; log=ROOT/('broom-'+datetime.now().strftime('%Y%m%d-%H%M%S')+'.jsonl')
-    seq=0; began=time.monotonic()
+    seq=0; began=time.monotonic(); last_log=0.0; last_cue=None; last_phase=None
+    phase_file=ROOT/'phase.txt'
     def publish(status):
         # Windows may temporarily deny replacement while AHK has the old
         # observation open. Treat that as a dropped frame, not a capture error.
@@ -98,11 +99,22 @@ def main():
                     im=ImageGrab.grab(bbox=(rect.left,rect.top,rect.right,rect.bottom),include_layered_windows=False,all_screens=True)
                     aspect=im.width/max(1,im.height)
                     frame=im.convert('RGB').resize((960,515))
-                    cue,scores=detect(frame, source_aspect=aspect)
-                    entry_score=entry_confirmation(frame)
+                    try:
+                        phase=phase_file.read_text(encoding='ascii').strip()
+                    except (OSError, UnicodeError):
+                        phase='unknown'
+                    if phase not in ('entry','entry_check','entry_search_w','entry_search_s','entry_search_center','waiting','game','return','returning'):
+                        phase='unknown'
+                    # Match only signals that can affect the current phase.
+                    # Unknown is conservative, so a missing file does not
+                    # silently disable any detector.
+                    cue,scores=detect(frame, source_aspect=aspect) if phase in ('waiting','game','unknown') else (None,{})
+                    entry_score=entry_confirmation(frame) if phase in ('entry_check','entry_search_w','entry_search_s','entry_search_center','unknown') else 0.0
                     game,red,purple,green,timer,entry,countdown,loading=scene_info(frame)
                     status=f'{seq}|{cue or "none"}|{game}|{red}|{purple}|{green}|{timer}|{entry}|{countdown}|{loading}|{round(entry_score*1000)}'
-                    f.write(json.dumps({'time':round(start-began,3),'cue':cue,'scores':scores,'hud_yellow':game,'lobby_red':red,'lobby_purple':purple,'dive_green':green,'timer_white':timer,'entry_white':entry,'entry_score':round(entry_score,3),'countdown_white':countdown,'loading_white':loading,'window':[rect.left,rect.top,rect.right,rect.bottom],'processing_ms':round((time.monotonic()-start)*1000,1)})+'\n')
+                    if start-last_log >= 1.0 or cue != last_cue or phase != last_phase or entry_score:
+                        f.write(json.dumps({'time':round(start-began,3),'phase':phase,'cue':cue,'scores':scores,'hud_yellow':game,'lobby_red':red,'lobby_purple':purple,'dive_green':green,'timer_white':timer,'entry_white':entry,'entry_score':round(entry_score,3),'countdown_white':countdown,'loading_white':loading,'window':[rect.left,rect.top,rect.right,rect.bottom],'processing_ms':round((time.monotonic()-start)*1000,1)})+'\n')
+                        last_log=start; last_cue=cue; last_phase=phase
                 else:
                     status=f'{seq}|unfocused|0|0|0|0|0|0|0|0|0'
                 if not publish(status):
@@ -113,7 +125,7 @@ def main():
                     publish(f'{seq}|error|0|0|0|0|0|0|0|0|0')
                 except OSError as publish_error:
                     f.write(json.dumps({'event':'publish_error','error':repr(publish_error)})+'\n')
-            time.sleep(max(.005,.05-(time.monotonic()-start)))
+            time.sleep(max(.001,.025-(time.monotonic()-start)))
 
 
 if __name__=='__main__':main()

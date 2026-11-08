@@ -12,7 +12,7 @@ global returnLeftAt := 0, lobbyStableAt := 0, controllerLog := ""
 global lastLobbyClick := 0, lobbyClickAttempts := 0
 global entryHits := 0, entryAttempts := 0
 global focusPaused := false, focusPauseAt := 0, focusRetryAt := 0, focusAttempts := 0, focusActiveAt := 0
-global helperDir := A_ScriptDir "\masquerade"
+global helperDir := A_ScriptDir "\masquerade", publishedPhase := ""
 OnExit Cleanup
 
 global panel := Gui("+AlwaysOnTop", "PS99 Broom Sweep " InstalledVersion())
@@ -81,7 +81,7 @@ Toggle(*) {
 Start() {
     global running, phase, helperPid, hwnd, phaseAt, lastSeq, freshAt, controllerLog, entryHits, entryAttempts, runGeneration
     global lastCue, lastCueAt, hudHits, hudMissingAt, lobbyHits, returnHits, returnLeftAt, lobbyStableAt, lastLobbyClick, lobbyClickAttempts
-    global focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt
+    global focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt, publishedPhase
     hwnd := WinExist("ahk_exe RobloxPlayerBeta.exe")
     python := A_ScriptDir "\runtime\python\pythonw.exe"
     if !FileExist(python)
@@ -109,6 +109,8 @@ Start() {
         Run '"' python '" "' helper '" ' hwnd, helperDir, "Hide", &helperPid
         runGeneration += 1
         running := true, phase := "entry", phaseAt := A_TickCount
+        publishedPhase := ""
+        PublishPhase()
         lastCue := "", lastCueAt := 0, hudHits := 0, hudMissingAt := 0
         lobbyHits := 0, returnHits := 0, returnLeftAt := 0, lobbyStableAt := 0
         lastLobbyClick := 0, lobbyClickAttempts := 0
@@ -131,12 +133,25 @@ LogEvent(event, detail := "") {
     try FileAppend Format("{} tick={} phase={} {} {}`n", FormatTime(, "yyyy-MM-dd HH:mm:ss"), A_TickCount, phase, event, detail), controllerLog, "UTF-8"
 }
 
+PublishPhase() {
+    global publishedPhase
+    if phase = publishedPhase
+        return
+    try {
+        out := FileOpen(helperDir "\phase.txt", "w", "UTF-8-RAW")
+        out.Write(phase)
+        out.Close()
+        publishedPhase := phase
+    }
+}
+
 Tick() {
     global phase, phaseAt, lastSeq, freshAt, lastCue, lastCueAt
     global hudHits, hudMissingAt, lobbyHits, returnHits, returnLeftAt, lobbyStableAt, lastLobbyClick, lobbyClickAttempts
     global entryHits, entryAttempts, focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt
     if !running
         return
+    PublishPhase()
     tickGeneration := runGeneration
     if !ProcessExist(helperPid) {
         Stop("Detector process stopped")
