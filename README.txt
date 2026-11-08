@@ -1,5 +1,10 @@
 BROOM SWEEP MACRO (WINDOWS)
 
+Download the ready-to-use BroomSweep-Portable.zip from:
+https://github.com/souplyy/ps99-broom-sweep/releases/latest
+The green GitHub Code > Download ZIP button downloads source code only and does
+not contain the runtime or version.json needed to run the macro.
+
 Extract the entire ZIP into a normal folder. The macro is PS99-Broom.ahk.
 If Windows doesn't know how to open .ahk files, right-click that file, choose
 Open with, select another app on this PC, and choose runtime\AutoHotkey64.exe

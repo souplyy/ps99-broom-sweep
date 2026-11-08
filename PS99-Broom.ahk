@@ -33,8 +33,15 @@ UpdateAndReload(*) {
         python := EnvGet("USERPROFILE") "\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\pythonw.exe"
     updater := A_ScriptDir "\updater.py"
     config := A_ScriptDir "\version.json"
-    if !FileExist(python) || !FileExist(updater) || !FileExist(config) {
-        MsgBox "The update checker is missing. Keep updater.py and version.json beside the macro."
+    missing := ""
+    if !FileExist(updater)
+        missing .= "`n- updater.py"
+    if !FileExist(config)
+        missing .= "`n- version.json"
+    if !FileExist(python)
+        missing .= "`n- bundled Python runtime (runtime\python\pythonw.exe)"
+    if missing {
+        MsgBox "The macro folder is incomplete. Missing:" missing "`n`nGitHub's Code > Download ZIP contains source files only. Download and extract BroomSweep-Portable.zip from:`nhttps://github.com/souplyy/ps99-broom-sweep/releases/latest"
         return
     }
     try {
@@ -61,8 +68,12 @@ Start() {
     if !FileExist(python)
         python := EnvGet("USERPROFILE") "\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\pythonw.exe"
     helper := helperDir "\live_detector.py"
-    if !hwnd || !FileExist(python) || !FileExist(helper) {
-        MsgBox "Open Roblox and keep the masquerade detector folder beside this macro."
+    if !hwnd {
+        MsgBox "Open Roblox before starting the macro."
+        return
+    }
+    if !FileExist(python) || !FileExist(helper) {
+        MsgBox "The portable runtime or detector is missing. GitHub's Code > Download ZIP is source-only. Download and extract BroomSweep-Portable.zip from:`nhttps://github.com/souplyy/ps99-broom-sweep/releases/latest"
         return
     }
     for name in ["stop.request", "observation.txt", "observation.tmp"] {
