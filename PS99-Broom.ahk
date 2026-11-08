@@ -218,9 +218,9 @@ Tick() {
         lastSeq := m[1]
         if m[2] = "error" {
             ; Let a transient capture error recover. The stale-data watchdog
-            ; below stops the macro if no good observations arrive for 2.5s.
-            if now-freshAt > 2500
-                Stop("Detector could not read Roblox for 2.5 seconds")
+            ; below stops the macro if no good observations arrive for 8 seconds.
+            if now-freshAt > 8000
+                Stop("Detector could not read Roblox for 8 seconds")
             else
                 status.Text := "Status: Retrying detector"
             return
@@ -358,7 +358,7 @@ Tick() {
             }
         }
     }
-    if now-freshAt > 2500 {
+    if now-freshAt > 8000 {
         Stop("Detector stopped responding")
         return
     }

@@ -19,7 +19,7 @@ def entry_confirmation(image):
     The colors come from the user's entry-line sample. This is a visual
     candidate, not proof that Roblox registered the player as joined.
     """
-    a=np.asarray(image.convert('RGB').resize((960,515)),dtype=np.int16)
+    a=np.asarray(image if image.mode == 'RGB' and image.size == (960,515) else image.convert('RGB').resize((960,515)),dtype=np.int16)
     r,g,b=a[:,:,0],a[:,:,1],a[:,:,2]
     green=(r>=140)&(r<=215)&(g>=220)&(b>=115)&(b<=205)&(g-r>=25)&(g-b>=25)
     purple=(r>=75)&(r<=175)&(g<=105)&(b>=110)&(b>=r+10)
@@ -47,7 +47,7 @@ def entry_confirmation(image):
 
 def scene_info(image):
     """Conservative scene signals; absence is not proof of a completed round."""
-    a=np.asarray(image.convert('RGB').resize((960,515)),dtype=np.int16)
+    a=np.asarray(image if image.mode == 'RGB' and image.size == (960,515) else image.convert('RGB').resize((960,515)),dtype=np.int16)
     # HUD: warm yellow letters in the 'GAME 1 OF 6' strip.
     r,g,b=(a[54:73,440:521,i] for i in range(3))
     game_count=int(((r>170)&(g>140)&(b<120)).sum())
@@ -96,9 +96,11 @@ def main():
                 focused=bool(user.GetForegroundWindow()==hwnd and user.GetWindowRect(hwnd,ctypes.byref(rect)))
                 if focused:
                     im=ImageGrab.grab(bbox=(rect.left,rect.top,rect.right,rect.bottom),include_layered_windows=False,all_screens=True)
-                    cue,scores=detect(im)
-                    entry_score=entry_confirmation(im)
-                    game,red,purple,green,timer,entry,countdown,loading=scene_info(im)
+                    aspect=im.width/max(1,im.height)
+                    frame=im.convert('RGB').resize((960,515))
+                    cue,scores=detect(frame, source_aspect=aspect)
+                    entry_score=entry_confirmation(frame)
+                    game,red,purple,green,timer,entry,countdown,loading=scene_info(frame)
                     status=f'{seq}|{cue or "none"}|{game}|{red}|{purple}|{green}|{timer}|{entry}|{countdown}|{loading}|{round(entry_score*1000)}'
                     f.write(json.dumps({'time':round(start-began,3),'cue':cue,'scores':scores,'hud_yellow':game,'lobby_red':red,'lobby_purple':purple,'dive_green':green,'timer_white':timer,'entry_white':entry,'entry_score':round(entry_score,3),'countdown_white':countdown,'loading_white':loading,'window':[rect.left,rect.top,rect.right,rect.bottom],'processing_ms':round((time.monotonic()-start)*1000,1)})+'\n')
                 else:

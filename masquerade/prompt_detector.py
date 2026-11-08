@@ -22,17 +22,25 @@ def load_template(kind):
 TEMPLATES={kind:load_template(kind) for kind in ('jump','dive')}
 
 
-def detect(image):
+def detect(image, source_aspect=None):
     # Recording included the Windows taskbar. Resize the game window to the
     # equivalent recorded content height, then search near the centered cue.
-    frame=image.convert('RGB').resize((960,515))
+    frame=image if image.mode == 'RGB' and image.size == (960,515) else image.convert('RGB').resize((960,515))
+    aspect = source_aspect or (image.width / max(1, image.height))
+    # Scaling the whole window to 960x515 stretches UI horizontally when its
+    # aspect ratio differs from the recording. Scale the cue template to match.
+    x_scale = max(.6, min(1.65, (960/515) / aspect))
     values={}
     for kind,template in TEMPLATES.items():
         mask=color_mask(frame,kind)[::2,::2]
+        if abs(x_scale-1.0) > .025:
+            template = np.asarray(Image.fromarray(template.astype(np.uint8)*255).resize(
+                (max(1, round(template.shape[1]*x_scale)), template.shape[0]), Image.Resampling.NEAREST)) > 0
         th,tw=template.shape
         # A cue is centered above the avatar. Search a bounded region for
         # vertical motion while excluding the permanent Dive button below.
-        x_min,x_max=200,235
+        center_x = (mask.shape[1]-tw)//2
+        x_min,x_max=max(0,center_x-23),min(mask.shape[1]-tw,center_x+23)
         y_min,y_max=57,120
         best=0.0; best_xy=None
         total=int(template.sum())
