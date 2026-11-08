@@ -42,18 +42,23 @@ def detect(image, source_aspect=None):
         center_x = (mask.shape[1]-tw)//2
         x_min,x_max=max(0,center_x-23),min(mask.shape[1]-tw,center_x+23)
         y_min,y_max=57,120
-        best=0.0; best_xy=None
         total=int(template.sum())
         if not total:
             raise ValueError('Empty prompt template')
-        for y in range(y_min,min(y_max,mask.shape[0]-th)+1):
-            for x in range(x_min,min(x_max,mask.shape[1]-tw)+1):
-                patch=mask[y:y+th,x:x+tw]
-                common=int(np.count_nonzero(patch & template))
-                # Penalize broad solid broom regions as well as missing glyphs.
-                score=2*common/(total+int(patch.sum())+1)
-                if score>best:
-                    best,best_xy=score,(x*2,y*2)
+        y_max=min(y_max,mask.shape[0]-th)
+        x_max=min(x_max,mask.shape[1]-tw)
+        # Compute the same template overlap as the old nested Python loops,
+        # using array operations over only the search area.
+        area=mask[y_min:y_max+th,x_min:x_max+tw].astype(np.float64)
+        shape=(area.shape[0]+th-1,area.shape[1]+tw-1)
+        overlap=np.fft.irfft2(np.fft.rfft2(area,shape)*np.fft.rfft2(template[::-1,::-1],shape),shape)
+        common=np.rint(overlap[th-1:th+y_max-y_min,tw-1:tw+x_max-x_min]).clip(min=0)
+        integral=np.pad(area.cumsum(0).cumsum(1),((1,0),(1,0)))
+        counts=integral[th:,tw:]-integral[:-th,tw:]-integral[th:,:-tw]+integral[:-th,:-tw]
+        scores=2*common/(total+counts+1)
+        iy,ix=np.unravel_index(np.argmax(scores),scores.shape)
+        best=float(scores[iy,ix])
+        best_xy=((x_min+int(ix))*2,(y_min+int(iy))*2) if best>0 else None
         values[kind]={'score':round(best,4),'position':best_xy}
     ordered=sorted(values,key=lambda k:values[k]['score'],reverse=True)
     winner=ordered[0]
