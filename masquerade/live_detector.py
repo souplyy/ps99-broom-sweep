@@ -116,6 +116,35 @@ def find_ready_magnet(image):
     return None
 
 
+def home_icon_visible(image):
+    """Recognize the red-roofed, yellow-door home icon in the lower center.
+
+    The guard is intentionally conservative: a possible match blocks a click.
+    """
+    frame=image if image.mode=='RGB' and image.size==(960,515) else image.convert('RGB').resize((960,515))
+    a=np.asarray(frame,dtype=np.int16)[330:515,288:672]
+    r,g,b=a[:,:,0],a[:,:,1],a[:,:,2]
+    red=(r>145)&(g<110)&(b<85)&(r>g+60)
+    yellow=(r>200)&(g>95)&(g<205)&(b<55)
+    neutral=(r>140)&(g>130)&(b>120)&(abs(r-g)<35)&(abs(g-b)<35)
+    dark=(r<65)&(g<65)&(b<65)
+    for y0,y1 in _runs(red.sum(axis=1)>=3,gap=3):
+        for x0,x1 in _runs(red[y0:y1].sum(axis=0)>=2,gap=3):
+            width=x1-x0; height=y1-y0
+            if not (15<=width<=100 and 8<=height<=100):
+                continue
+            area=width*height
+            xlo=max(0,x0-width//5); xhi=min(a.shape[1],x1+width//5)
+            ylo=max(0,y0-height//5); yhi=min(a.shape[0],y1+height//2)
+            region=(slice(ylo,yhi),slice(xlo,xhi))
+            if (red[region].sum()>=max(20,area*.05)
+                and yellow[region].sum()>=max(6,area*.015)
+                and neutral[region].sum()>=max(12,area*.06)
+                and dark[region].sum()>=max(10,area*.03)):
+                return True
+    return False
+
+
 def magnet_worker():
     hwnd=int(sys.argv[2]); user=ctypes.windll.user32
     user.SetProcessDPIAware()
@@ -156,6 +185,10 @@ def main():
     stop=ROOT/'stop.request'; log=ROOT/('broom-'+datetime.now().strftime('%Y%m%d-%H%M%S')+'.jsonl')
     seq=0; began=time.monotonic(); last_log=0.0; last_cue=None; last_phase=None
     phase_file=ROOT/'phase.txt'
+    safety_request=ROOT/'click-safety-request.txt'
+    safety_output=ROOT/'click-safety-result.txt'
+    safety_temp=ROOT/'click-safety-result.tmp'
+    last_safety_request=''
     def publish(status):
         # Windows may temporarily deny replacement while AHK has the old
         # observation open. Treat that as a dropped frame, not a capture error.
@@ -197,6 +230,22 @@ def main():
                     status=f'{seq}|unfocused|0|0|0|0|0|0|0|0|0'
                 if not publish(status):
                     f.write(json.dumps({'event':'observation_busy','time':round(start-began,3)})+'\n')
+                # Respond only after the normal cue observation has been
+                # published, so a click check does not delay a jump or dive.
+                try:
+                    request=safety_request.read_text(encoding='ascii').strip()
+                except (OSError,UnicodeError):
+                    request=''
+                if focused and request.isdigit() and request != last_safety_request:
+                    blocked=home_icon_visible(frame)
+                    timestamp=ctypes.windll.kernel32.GetTickCount() & 0xffffffff
+                    safety_temp.write_text(f'{request}|{int(blocked)}|{timestamp}',encoding='ascii')
+                    try:
+                        os.replace(safety_temp,safety_output)
+                        last_safety_request=request
+                        f.write(json.dumps({'event':'click_safety','blocked':blocked,'time':round(start-began,3)})+'\n')
+                    except PermissionError:
+                        pass
             except Exception as e:
                 f.write(json.dumps({'event':'error','error':repr(e)})+'\n')
                 try:

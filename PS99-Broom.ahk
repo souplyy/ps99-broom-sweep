@@ -6,7 +6,7 @@ SetKeyDelay -1, 25
 Thread "Interrupt", 0
 
 global running := false, phase := "off", helperPid := 0, hwnd := 0, runGeneration := 0
-global gamesPlayed := 0, updateCheckPid := 0
+global gamesPlayed := 0, updateCheckPid := 0, clickGuardRetryAt := 0, clickGuardCounter := 0
 global phaseAt := 0, lastSeq := "", freshAt := 0, lastCue := "", lastCueAt := 0
 global hudHits := 0, hudMissingAt := 0, lobbyHits := 0, returnHits := 0
 global returnLeftAt := 0, lobbyStableAt := 0, controllerLog := ""
@@ -207,7 +207,7 @@ StopMagnet() {
 
 MagnetTick() {
     global magnetBusy, magnetLastClick, magnetSeq, magnetUsed
-    if !running || !magnetCheck.Value || magnetUsed || magnetBusy || focusPaused || !WinActive("ahk_id " hwnd)
+    if !running || !magnetCheck.Value || magnetUsed || magnetBusy || focusPaused || !WinActive("ahk_id " hwnd) || A_TickCount < clickGuardRetryAt
         return
     ; Use it only near the beginning of the first minigame, once per run.
     if phase != "game" || A_TickCount-phaseAt > 15000 {
@@ -228,6 +228,16 @@ MagnetTick() {
         MouseGetPos &oldX, &oldY
         if !MoveByRelativeInput(x, y, generation) || !running || generation != runGeneration || !magnetCheck.Value || !WinActive("ahk_id " hwnd) || phase != "game" || A_TickCount-phaseAt > 15000 || magnetUsed
             return
+        latest := ""
+        try latest := Trim(FileRead(helperDir "\magnet-observation.txt", "UTF-8"))
+        if !RegExMatch(latest, "^(\d+)\|(-?\d+)\|(-?\d+)\|(\d+)$", &check)
+            return
+        age := A_TickCount-Integer(check[4])
+        if age < 0 || age > 1200 || Abs(Integer(check[2])-x) > 10 || Abs(Integer(check[3])-y) > 10
+            return
+        if !ClickGuard(generation)
+            return
+        ; Re-check that the magnet is still detected after the guard wait.
         latest := ""
         try latest := Trim(FileRead(helperDir "\magnet-observation.txt", "UTF-8"))
         if !RegExMatch(latest, "^(\d+)\|(-?\d+)\|(-?\d+)\|(\d+)$", &check)
@@ -537,7 +547,54 @@ Tick() {
     ; these phases until the corresponding visual signal appears or F6 stops.
 }
 
+
+ClickGuard(generation) {
+    global clickGuardCounter, clickGuardRetryAt
+    if A_TickCount < clickGuardRetryAt
+        return false
+    if !running || generation != runGeneration || !WinActive("ahk_id " hwnd)
+        return false
+    clickGuardCounter += 1
+    request := A_TickCount "" clickGuardCounter
+    try {
+        out := FileOpen(helperDir "\click-safety-request.txt", "w", "UTF-8-RAW")
+        out.Write(request)
+        out.Close()
+    } catch {
+        clickGuardRetryAt := A_TickCount+2000
+        LogEvent("click_guard_blocked", "reason=request_write_failed")
+        status.Text := "Status: Click paused; safety check unavailable"
+        return false
+    }
+    started := A_TickCount
+    while A_TickCount-started < 2000 {
+        if !running || generation != runGeneration || !WinActive("ahk_id " hwnd)
+            return false
+        result := ""
+        try result := Trim(FileRead(helperDir "\click-safety-result.txt", "UTF-8"))
+        if RegExMatch(result, "^(\d+)\|([01])\|(\d+)$", &reply) && reply[1] = request {
+            age := A_TickCount-Integer(reply[3])
+            if age >= 0 && age <= 750 {
+                if reply[2] = "0"
+                    return true
+                clickGuardRetryAt := A_TickCount+2000
+                LogEvent("click_guard_blocked", "reason=home_icon")
+                status.Text := "Status: Home icon detected; clicks paused"
+                return false
+            }
+            break
+        }
+        Sleep 25
+    }
+    clickGuardRetryAt := A_TickCount+2000
+    LogEvent("click_guard_blocked", "reason=check_timeout_or_stale")
+    status.Text := "Status: Click paused; safety check unavailable"
+    return false
+}
+
 ClickLobbyButton(redCount) {
+    if A_TickCount < clickGuardRetryAt
+        return false
     clickGeneration := runGeneration
     WinGetPos &wx, &wy, &ww, &wh, "ahk_id " hwnd
     MouseGetPos &oldX, &oldY
@@ -563,6 +620,13 @@ ClickLobbyButton(redCount) {
         Stop("Mouse could not reach Lobby button")
         return false
     }
+    if !ClickGuard(clickGeneration) || !running || clickGeneration != runGeneration || !WinActive("ahk_id " hwnd) || phase != "return" && phase != "returning"
+        return false
+    ; Verify the Lobby button is still present after moving and checking.
+    fresh := ""
+    try fresh := Trim(FileRead(helperDir "\observation.txt", "UTF-8"))
+    if !RegExMatch(fresh, "^\d+\|(?:none|jump|dive)\|\d+\|(\d+)\|", &check) || Integer(check[1]) <= 4500
+        return false
     SendInput "{LButton down}"
     try Sleep 60
     finally SendInput "{LButton up}"
