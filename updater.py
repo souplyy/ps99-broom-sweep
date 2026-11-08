@@ -147,6 +147,7 @@ def run():
             raise ValueError('Invalid reload arguments')
         if not wait_for_process(int(reload_args[1])):
             log('Original macro did not exit; update cancelled.')
+            ctypes.windll.user32.MessageBoxW(None, 'The macro did not close in time, so the update was cancelled. Close it and try Update / reload again.', 'Broom Sweep updater', 0x30)
             return
     try:
         main()
@@ -155,10 +156,23 @@ def run():
     finally:
         if reload_args:
             ahk,script=map(Path,reload_args[2:])
-            if script.resolve() != (ROOT/'PS99-Broom.ahk').resolve() or not ahk.is_file():
-                log('Cannot reopen: invalid script or AutoHotkey path.')
+            if script.resolve() != (ROOT/'PS99-Broom.ahk').resolve():
+                log('Cannot reopen: invalid script path.')
+                ctypes.windll.user32.MessageBoxW(None, 'Could not reopen the macro because its script path was invalid. Open PS99-Broom.ahk manually.', 'Broom Sweep updater', 0x30)
             else:
-                subprocess.Popen([str(ahk),str(script)],cwd=str(ROOT))
+                bundled=ROOT/'runtime'/'AutoHotkey64.exe'
+                candidates=[path for i,path in enumerate((bundled,ahk)) if path.is_file() and path not in (bundled,ahk)[:i]]
+                errors=[]
+                for exe in candidates:
+                    try:
+                        process=subprocess.Popen([str(exe),str(script)],cwd=str(ROOT))
+                        log('Relaunched macro: '+str(exe)+' pid='+str(process.pid))
+                        break
+                    except OSError as exc:
+                        errors.append(repr(exc))
+                else:
+                    log('Cannot reopen macro: '+('; '.join(errors) or 'AutoHotkey executable missing'))
+                    ctypes.windll.user32.MessageBoxW(None, 'The update check finished, but the macro could not reopen. Double-click PS99-Broom.ahk to start it. See update-status.log for details.', 'Broom Sweep updater', 0x30)
 
 
 if __name__=='__main__':

@@ -5,7 +5,7 @@ CoordMode "Mouse", "Screen"
 SetKeyDelay -1, 25
 Thread "Interrupt", 0
 
-global running := false, phase := "off", helperPid := 0, hwnd := 0
+global running := false, phase := "off", helperPid := 0, hwnd := 0, runGeneration := 0
 global phaseAt := 0, lastSeq := "", freshAt := 0, lastCue := "", lastCueAt := 0
 global hudHits := 0, hudMissingAt := 0, lobbyHits := 0, returnHits := 0
 global returnLeftAt := 0, lobbyStableAt := 0, controllerLog := ""
@@ -72,7 +72,8 @@ Toggle(*) {
 }
 
 Start() {
-    global running, phase, helperPid, hwnd, phaseAt, lastSeq, freshAt, controllerLog, entryHits, entryAttempts
+    global running, phase, helperPid, hwnd, phaseAt, lastSeq, freshAt, controllerLog, entryHits, entryAttempts, runGeneration
+    global lastCue, lastCueAt, hudHits, hudMissingAt, lobbyHits, returnHits, returnLeftAt, lobbyStableAt, lastLobbyClick, lobbyClickAttempts
     global focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt
     hwnd := WinExist("ahk_exe RobloxPlayerBeta.exe")
     python := A_ScriptDir "\runtime\python\pythonw.exe"
@@ -90,12 +91,20 @@ Start() {
     for name in ["stop.request", "observation.txt", "observation.tmp"] {
         try FileDelete helperDir "\" name
     }
+    if FileExist(helperDir "\stop.request") {
+        MsgBox "Could not clear the old detector stop file. Close other copies of the macro and try again."
+        return
+    }
     try {
         WinActivate "ahk_id " hwnd
         if !WinWaitActive("ahk_id " hwnd, , 2)
             throw Error("Could not focus Roblox")
         Run '"' python '" "' helper '" ' hwnd, helperDir, "Hide", &helperPid
+        runGeneration += 1
         running := true, phase := "entry", phaseAt := A_TickCount
+        lastCue := "", lastCueAt := 0, hudHits := 0, hudMissingAt := 0
+        lobbyHits := 0, returnHits := 0, returnLeftAt := 0, lobbyStableAt := 0
+        lastLobbyClick := 0, lobbyClickAttempts := 0
         entryHits := 0, entryAttempts := 0
         focusPaused := false, focusPauseAt := 0, focusRetryAt := 0, focusAttempts := 0, focusActiveAt := 0
         controllerLog := helperDir "\controller-" FormatTime(, "yyyyMMdd-HHmmss") "-" DllCall("GetCurrentProcessId") ".log"
@@ -121,6 +130,7 @@ Tick() {
     global entryHits, entryAttempts, focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt
     if !running
         return
+    tickGeneration := runGeneration
     if !ProcessExist(helperPid) {
         Stop("Detector process stopped")
         return
@@ -304,7 +314,7 @@ Tick() {
         } else if phase = "return" {
             lobbyHits := Integer(m[4]) > 4500 ? lobbyHits+1 : 0
             if lobbyHits >= 3 {
-                if !ClickLobbyButton(m[4])
+                if !ClickLobbyButton(m[4]) || !running || tickGeneration != runGeneration
                     return
                 phase := "returning", phaseAt := A_TickCount, returnHits := 0
                 returnLeftAt := 0, lobbyStableAt := 0
@@ -323,7 +333,7 @@ Tick() {
                 status.Text := "Status: Waiting for Lobby click to take effect"
                 if now-lastLobbyClick >= 8000 && lobbyClickAttempts < 3 {
                     LogEvent("lobby_click_retry", "attempt=" (lobbyClickAttempts+1) " red=" m[4])
-                    if !ClickLobbyButton(m[4])
+                    if !ClickLobbyButton(m[4]) || !running || tickGeneration != runGeneration
                         return
                     lobbyClickAttempts += 1
                     lastLobbyClick := A_TickCount, phaseAt := lastLobbyClick
@@ -367,6 +377,7 @@ Tick() {
 }
 
 ClickLobbyButton(redCount) {
+    clickGeneration := runGeneration
     WinGetPos &wx, &wy, &ww, &wh, "ahk_id " hwnd
     MouseGetPos &oldX, &oldY
     clickX := wx+Round(ww*.5), clickY := wy+Round(wh*.925)
@@ -374,14 +385,14 @@ ClickLobbyButton(redCount) {
     status.Text := "Status: Moving mouse to Lobby"
     ; Relative SendInput movements generate mouse-input events, rather than
     ; relying on the visible Windows pointer changing position alone.
-    if !MoveByRelativeInput(clickX, clickY) {
+    if !MoveByRelativeInput(clickX, clickY, clickGeneration) {
         LogEvent("lobby_click_cancelled", "reason=relative_move_failed")
-        if running && WinActive("ahk_id " hwnd)
+        if running && clickGeneration = runGeneration && WinActive("ahk_id " hwnd)
             Stop("Could not move mouse to Lobby")
         return false
     }
     Sleep 250
-    if !running || !WinActive("ahk_id " hwnd) {
+    if !running || clickGeneration != runGeneration || !WinActive("ahk_id " hwnd) {
         LogEvent("lobby_click_cancelled", "reason=focus_or_stop")
         return false
     }
@@ -397,11 +408,13 @@ ClickLobbyButton(redCount) {
     LogEvent("lobby_click_sent", "x=" actualX " y=" actualY)
     ; Give Roblox time to consume the release before restoring the cursor.
     Sleep 700
+    if !running || clickGeneration != runGeneration || !WinActive("ahk_id " hwnd)
+        return false
     MouseMove oldX, oldY, 0
     return true
 }
 
-MoveByRelativeInput(goalX, goalY) {
+MoveByRelativeInput(goalX, goalY, generation) {
     ; Windows can scale relative input according to pointer settings, so use
     ; small steps and re-measure rather than assuming 1 input unit = 1 pixel.
     size := A_PtrSize = 8 ? 40 : 28
@@ -411,7 +424,7 @@ MoveByRelativeInput(goalX, goalY) {
     NumPut("UInt", 0x2001, input, offset+12) ; MOVE | MOVE_NOCOALESCE
     started := A_TickCount
     loop 600 {
-        if !running || !WinActive("ahk_id " hwnd) || A_TickCount-started > 6000
+        if !running || generation != runGeneration || !WinActive("ahk_id " hwnd) || A_TickCount-started > 6000
             return false
         MouseGetPos &x, &y
         dx := goalX-x, dy := goalY-y
@@ -430,7 +443,8 @@ MoveByRelativeInput(goalX, goalY) {
 }
 
 Stop(message := "Off") {
-    global running, phase, helperPid
+    global running, phase, helperPid, runGeneration
+    runGeneration += 1
     if running
         LogEvent("stop", "reason=" message)
     running := false, phase := "off"
@@ -440,6 +454,7 @@ Stop(message := "Off") {
         try FileAppend "stop", helperDir "\stop.request", "UTF-8"
         ; Terminate only this macro's own helper; no other processes are touched.
         try ProcessClose helperPid
+        try ProcessWaitClose helperPid, 2
     }
     helperPid := 0
     status.Text := "Status: " message
