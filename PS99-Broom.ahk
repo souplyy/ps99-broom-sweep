@@ -321,7 +321,7 @@ Tick() {
             focusActiveAt := now
         data := ""
         try data := Trim(FileRead(helperDir "\observation.txt", "UTF-8"))
-        if !RegExMatch(data, "^(\d+)\|(none|jump|dive)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)$", &resume) || resume[1] = lastSeq {
+        if !RegExMatch(data, "^(\d+)\|(none|jump|dive)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)$", &resume) || resume[1] = lastSeq {
             if now-focusActiveAt > 10000 {
                 focusPaused := false
                 Stop("Detector did not recover after focus returned")
@@ -388,7 +388,7 @@ Tick() {
     }
     data := ""
     try data := Trim(FileRead(helperDir "\observation.txt", "UTF-8"))
-    if RegExMatch(data, "^(\d+)\|(none|jump|dive|unfocused|error)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)$", &m) && m[1] != lastSeq {
+    if RegExMatch(data, "^(\d+)\|(none|jump|dive|unfocused|error)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)$", &m) && m[1] != lastSeq {
         lastSeq := m[1]
         if m[2] = "error" {
             ; Let a transient capture error recover. The stale-data watchdog
@@ -482,6 +482,8 @@ Tick() {
                     lastCue := ""
             }
         } else if phase = "return" {
+            if MaybeResumeFromLobby(m, now)
+                return
             lobbyHits := Integer(m[4]) > 4500 ? lobbyHits+1 : 0
             if lobbyHits >= 3 {
                 if !ClickLobbyButton(m[4]) || !running || tickGeneration != runGeneration
@@ -510,26 +512,9 @@ Tick() {
                 } else if lobbyClickAttempts >= 3
                     status.Text := "Status: Lobby still visible; click it manually or press F6"
             }
-            ; Purple alone also appears in other scenes: require a settled
-            ; lobby-like view with no round timer, Dive button or countdown.
-            looksLikeLobby := Integer(m[5]) > 8000 && Integer(m[4]) < 1000
-                && Integer(m[6]) < 600 && Integer(m[7]) < 120
-                && Integer(m[9]) < 1200 && Integer(m[10]) < 12000
-            if returnLeftAt && now-returnLeftAt >= 1500 && now-phaseAt >= 12000 && looksLikeLobby {
-                if !lobbyStableAt {
-                    lobbyStableAt := now
-                    LogEvent("lobby_candidate", "purple=" m[5] " timer=" m[7])
-                }
-            } else
-                lobbyStableAt := 0
-            if lobbyStableAt && now-lobbyStableAt >= 3000 {
-                phase := "entry", phaseAt := now
-                magnetUsed := false
-                entryHits := 0, entryAttempts := 0
-                LogEvent("lobby_confirmed", "wait_ms=" (now-returnLeftAt) " stable_ms=" (now-lobbyStableAt))
-                SendEvent "{d down}"
-                status.Text := "Status: Entering again (D for 7.5 seconds)"
-            } else if returnLeftAt {
+            if MaybeResumeFromLobby(m, now)
+                return
+            if returnLeftAt {
                 if Integer(m[10]) > 22000
                     status.Text := "Status: Roblox loading screen visible"
                 else if now-phaseAt < 12000
@@ -547,6 +532,37 @@ Tick() {
     ; these phases until the corresponding visual signal appears or F6 stops.
 }
 
+
+
+MaybeResumeFromLobby(observation, now) {
+    global phase, phaseAt, returnLeftAt, lobbyStableAt, entryHits, entryAttempts, magnetUsed
+    red := Integer(observation[4])
+    topPurple := Integer(observation[5])
+    spawnEvidence := Integer(observation[12]) = 1
+    quiet := red < 1000 && Integer(observation[6]) < 600 && Integer(observation[7]) < 120
+        && Integer(observation[9]) < 1200 && Integer(observation[10]) < 12000
+    ; The lower-screen evidence can also recover if the Lobby click succeeded
+    ; but the controller missed the transition to the "returning" phase.
+    oldEvidence := phase = "returning" && returnLeftAt && now-returnLeftAt >= 1500 && topPurple > 8000
+    candidate := quiet && now-phaseAt >= 12000 && (spawnEvidence || oldEvidence)
+    if !candidate {
+        lobbyStableAt := 0
+        return false
+    }
+    if !lobbyStableAt {
+        lobbyStableAt := now
+        LogEvent("lobby_candidate", "purple=" topPurple " spawn=" spawnEvidence " timer=" observation[7])
+        return false
+    }
+    if now-lobbyStableAt < 3000
+        return false
+    LogEvent("lobby_confirmed", "spawn=" spawnEvidence " stable_ms=" (now-lobbyStableAt))
+    phase := "entry", phaseAt := now
+    magnetUsed := false, entryHits := 0, entryAttempts := 0, lobbyStableAt := 0
+    SendEvent "{d down}"
+    status.Text := "Status: Entering again (D for 7.5 seconds)"
+    return true
+}
 
 ClickGuard(generation) {
     global clickGuardCounter, clickGuardRetryAt

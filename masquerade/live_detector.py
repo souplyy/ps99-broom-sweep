@@ -145,6 +145,15 @@ def home_icon_visible(image):
     return False
 
 
+def lobby_spawn_visible(image):
+    """Recognize a loaded event lobby even if the upper view is obstructed."""
+    frame=image if image.mode=='RGB' and image.size==(960,515) else image.convert('RGB').resize((960,515))
+    a=np.asarray(frame,dtype=np.int16)[200:480]
+    r,g,b=a[:,:,0],a[:,:,1],a[:,:,2]
+    pink=(r>145)&(b>125)&(g<110)&(r>g*1.4)&(b>g*1.25)
+    return int(pink.sum()) >= 10000 and home_icon_visible(frame)
+
+
 def magnet_worker():
     hwnd=int(sys.argv[2]); user=ctypes.windll.user32
     user.SetProcessDPIAware()
@@ -222,12 +231,13 @@ def main():
                     cue,scores=detect(frame, source_aspect=aspect) if phase in ('waiting','game','unknown') else (None,{})
                     entry_score=entry_confirmation(frame) if phase in ('entry_check','entry_search_w','entry_search_s','entry_search_center','unknown') else 0.0
                     game,red,purple,green,timer,entry,countdown,loading=scene_info(frame)
-                    status=f'{seq}|{cue or "none"}|{game}|{red}|{purple}|{green}|{timer}|{entry}|{countdown}|{loading}|{round(entry_score*1000)}'
+                    lobby_spawn=int(lobby_spawn_visible(frame)) if phase in ('return','returning','unknown') else 0
+                    status=f'{seq}|{cue or "none"}|{game}|{red}|{purple}|{green}|{timer}|{entry}|{countdown}|{loading}|{round(entry_score*1000)}|{lobby_spawn}'
                     if start-last_log >= 1.0 or cue != last_cue or phase != last_phase or entry_score:
-                        f.write(json.dumps({'time':round(start-began,3),'phase':phase,'cue':cue,'scores':scores,'hud_yellow':game,'lobby_red':red,'lobby_purple':purple,'dive_green':green,'timer_white':timer,'entry_white':entry,'entry_score':round(entry_score,3),'countdown_white':countdown,'loading_white':loading,'window':[rect.left,rect.top,rect.right,rect.bottom],'processing_ms':round((time.monotonic()-start)*1000,1)})+'\n')
+                        f.write(json.dumps({'time':round(start-began,3),'phase':phase,'cue':cue,'scores':scores,'hud_yellow':game,'lobby_red':red,'lobby_purple':purple,'dive_green':green,'timer_white':timer,'entry_white':entry,'entry_score':round(entry_score,3),'lobby_spawn':lobby_spawn,'countdown_white':countdown,'loading_white':loading,'window':[rect.left,rect.top,rect.right,rect.bottom],'processing_ms':round((time.monotonic()-start)*1000,1)})+'\n')
                         last_log=start; last_cue=cue; last_phase=phase
                 else:
-                    status=f'{seq}|unfocused|0|0|0|0|0|0|0|0|0'
+                    status=f'{seq}|unfocused|0|0|0|0|0|0|0|0|0|0'
                 if not publish(status):
                     f.write(json.dumps({'event':'observation_busy','time':round(start-began,3)})+'\n')
                 # Respond only after the normal cue observation has been
@@ -249,7 +259,7 @@ def main():
             except Exception as e:
                 f.write(json.dumps({'event':'error','error':repr(e)})+'\n')
                 try:
-                    publish(f'{seq}|error|0|0|0|0|0|0|0|0|0')
+                    publish(f'{seq}|error|0|0|0|0|0|0|0|0|0|0')
                 except OSError as publish_error:
                     f.write(json.dumps({'event':'publish_error','error':repr(publish_error)})+'\n')
             time.sleep(max(.001,.025-(time.monotonic()-start)))
