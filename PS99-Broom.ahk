@@ -13,7 +13,7 @@ global lastLobbyClick := 0, lobbyClickAttempts := 0
 global entryHits := 0, entryAttempts := 0
 global focusPaused := false, focusPauseAt := 0, focusRetryAt := 0, focusAttempts := 0, focusActiveAt := 0
 global helperDir := A_ScriptDir "\masquerade", publishedPhase := ""
-global magnetPid := 0, magnetBusy := false, magnetLastClick := 0, magnetSeq := ""
+global magnetPid := 0, magnetBusy := false, magnetLastClick := 0, magnetSeq := "", magnetUsed := false
 OnExit Cleanup
 
 global panel := Gui("+AlwaysOnTop", "PS99 Broom Sweep " InstalledVersion())
@@ -86,7 +86,8 @@ Toggle(*) {
 Start() {
     global running, phase, helperPid, hwnd, phaseAt, lastSeq, freshAt, controllerLog, entryHits, entryAttempts, runGeneration
     global lastCue, lastCueAt, hudHits, hudMissingAt, lobbyHits, returnHits, returnLeftAt, lobbyStableAt, lastLobbyClick, lobbyClickAttempts
-    global focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt, publishedPhase
+    global focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt, publishedPhase, magnetUsed
+    magnetUsed := false
     hwnd := WinExist("ahk_exe RobloxPlayerBeta.exe")
     python := A_ScriptDir "\runtime\python\pythonw.exe"
     if !FileExist(python)
@@ -127,8 +128,6 @@ Start() {
         SendEvent "{d down}"
         status.Text := "Status: Entering (D for 7.5 seconds)"
         SetTimer Tick, 30, 10
-        if magnetCheck.Value
-            StartMagnet()
     } catch Error as e {
         Stop("Start failed: " e.Message)
     }
@@ -139,9 +138,9 @@ MagnetOptionChanged(*) {
     try IniWrite magnetCheck.Value, A_ScriptDir "\settings.ini", "Options", "TreatMagnet"
     if !running
         return
-    if magnetCheck.Value
+    if magnetCheck.Value && phase = "game" && !magnetUsed && A_TickCount-phaseAt <= 15000
         StartMagnet()
-    else
+    else if !magnetCheck.Value
         StopMagnet()
 }
 
@@ -174,14 +173,14 @@ StopMagnet() {
 }
 
 MagnetTick() {
-    global magnetBusy, magnetLastClick, magnetSeq
-    if !running || !magnetCheck.Value || magnetBusy || focusPaused || !WinActive("ahk_id " hwnd)
+    global magnetBusy, magnetLastClick, magnetSeq, magnetUsed
+    if !running || !magnetCheck.Value || magnetUsed || magnetBusy || focusPaused || !WinActive("ahk_id " hwnd)
         return
-    ; The Lobby flow controls the mouse itself. Avoid conflicting with it.
-    if phase = "return" || phase = "returning"
+    ; Use it only near the beginning of the first minigame, once per run.
+    if phase != "game" || A_TickCount-phaseAt > 15000 {
+        StopMagnet()
         return
-    if A_TickCount-magnetLastClick < 8000 && magnetLastClick
-        return
+    }
     data := ""
     try data := Trim(FileRead(helperDir "\magnet-observation.txt", "UTF-8"))
     if !RegExMatch(data, "^(\d+)\|(-?\d+)\|(-?\d+)\|(\d+)$", &m) || m[1] = magnetSeq
@@ -194,7 +193,7 @@ MagnetTick() {
     magnetBusy := true
     try {
         MouseGetPos &oldX, &oldY
-        if !MoveByRelativeInput(x, y, generation) || !running || generation != runGeneration || !magnetCheck.Value || !WinActive("ahk_id " hwnd) || phase = "return" || phase = "returning"
+        if !MoveByRelativeInput(x, y, generation) || !running || generation != runGeneration || !magnetCheck.Value || !WinActive("ahk_id " hwnd) || phase != "game" || A_TickCount-phaseAt > 15000 || magnetUsed
             return
         latest := ""
         try latest := Trim(FileRead(helperDir "\magnet-observation.txt", "UTF-8"))
@@ -208,16 +207,18 @@ MagnetTick() {
         ; Keep the final focus check and mouse-down together. Cues can
         ; interrupt again immediately after the button is pressed.
         Critical "On"
-        if !running || generation != runGeneration || !magnetCheck.Value || !WinActive("ahk_id " hwnd) || phase = "return" || phase = "returning" {
+        if !running || generation != runGeneration || !magnetCheck.Value || !WinActive("ahk_id " hwnd) || phase != "game" || A_TickCount-phaseAt > 15000 || magnetUsed {
             Critical "Off"
             return
         }
         SendInput "{LButton down}"
+        magnetUsed := true
         Critical "Off"
         try Sleep 60
         finally SendInput "{LButton up}"
         magnetLastClick := A_TickCount
-        LogEvent("magnet_clicked", "x=" x " y=" y)
+        LogEvent("magnet_clicked", "x=" x " y=" y " once_per_game=1")
+        StopMagnet()
         if running && generation = runGeneration && WinActive("ahk_id " hwnd)
             MouseMove oldX, oldY, 0
     } finally {
@@ -246,7 +247,7 @@ PublishPhase() {
 Tick() {
     global phase, phaseAt, lastSeq, freshAt, lastCue, lastCueAt
     global hudHits, hudMissingAt, lobbyHits, returnHits, returnLeftAt, lobbyStableAt, lastLobbyClick, lobbyClickAttempts
-    global entryHits, entryAttempts, focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt
+    global entryHits, entryAttempts, focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt, magnetUsed
     if !running
         return
     PublishPhase()
@@ -389,6 +390,8 @@ Tick() {
                         SendEvent "t"
                     lastCue := m[2], lastCueAt := now
                 }
+                if magnetCheck.Value && !magnetUsed
+                    StartMagnet()
             } else if Integer(m[10]) > 22000 {
                 status.Text := "Status: Loading game"
             } else if Integer(m[9]) >= 1200 && Integer(m[9]) <= 10000 {
@@ -476,6 +479,7 @@ Tick() {
                 lobbyStableAt := 0
             if lobbyStableAt && now-lobbyStableAt >= 3000 {
                 phase := "entry", phaseAt := now
+                magnetUsed := false
                 entryHits := 0, entryAttempts := 0
                 LogEvent("lobby_confirmed", "wait_ms=" (now-returnLeftAt) " stable_ms=" (now-lobbyStableAt))
                 SendEvent "{d down}"

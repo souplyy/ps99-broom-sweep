@@ -90,6 +90,9 @@ def find_ready_magnet(image):
     green=(g>155)&(g-r>55)&(g-b>35)
     purple=(r>65)&(b>80)&(r>g*1.3)&(b>g*1.3)
     gold=(r>150)&(g>95)&(b<90)&(r>b+50)
+    # The Lucky Charm is orange, while the magnet has vivid purple/magenta
+    # across its icon. Generic dark purple backgrounds are not sufficient.
+    magenta=(r>110)&(b>120)&(r>g*1.6)&(b>g*1.6)
     for y0,y1 in _runs(cyan.sum(axis=1)>=8):
         if not 12 <= y1-y0 <= 100:
             continue
@@ -106,6 +109,8 @@ def find_ready_magnet(image):
             icon=purple[y0:y1,x0:x1].sum()
             highlight=gold[y0:y1,x0:x1].sum()
             if icon < max(6,area*.025) or highlight < max(2,area*.004):
+                continue
+            if magenta[y0:y1,x0:x1].sum() < max(4,area*.04):
                 continue
             return (xbase+(x0+x1)//2,(y0+y1)//2)
     return None
