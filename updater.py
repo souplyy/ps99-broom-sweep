@@ -22,6 +22,29 @@ ALLOWED={'PS99-Broom.ahk','masquerade/live_detector.py','masquerade/prompt_detec
 MAX_DOWNLOAD=12*1024*1024
 
 
+def macro_window_exists():
+    """Find both the original and versioned macro-window titles."""
+    user=ctypes.windll.user32
+    found=[]
+    callback_type=ctypes.WINFUNCTYPE(ctypes.c_bool,ctypes.c_void_p,ctypes.c_void_p)
+    user.GetWindowTextLengthW.argtypes=[ctypes.c_void_p]
+    user.GetWindowTextLengthW.restype=ctypes.c_int
+    user.GetWindowTextW.argtypes=[ctypes.c_void_p,ctypes.c_wchar_p,ctypes.c_int]
+    user.EnumWindows.argtypes=[callback_type,ctypes.c_void_p]
+    @callback_type
+    def visit(hwnd,_):
+        size=user.GetWindowTextLengthW(hwnd)
+        if size:
+            title=ctypes.create_unicode_buffer(size+1)
+            user.GetWindowTextW(hwnd,title,size+1)
+            if title.value=='PS99 Broom Sweep' or title.value.startswith('PS99 Broom Sweep '):
+                found.append(title.value)
+                return False
+        return True
+    user.EnumWindows(visit,None)
+    return bool(found)
+
+
 def fetch(url,limit):
     request=urllib.request.Request(url,headers={'User-Agent':'BroomSweep-Updater/1','Accept':'application/vnd.github+json'})
     with urllib.request.urlopen(request,timeout=5) as response:
@@ -47,7 +70,7 @@ def main():
         log('Update source not configured; starting installed version.')
         return
     # Do not replace files in an already-running macro or its detector.
-    if ctypes.windll.user32.FindWindowW(None,'PS99 Broom Sweep'):
+    if macro_window_exists():
         log('Macro is already running; update check skipped.')
         return
     release=json.loads(fetch('https://api.github.com/repos/'+repository+'/releases/latest',1024*1024))

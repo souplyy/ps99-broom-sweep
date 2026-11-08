@@ -14,10 +14,9 @@ global entryHits := 0, entryAttempts := 0
 global helperDir := A_ScriptDir "\masquerade"
 OnExit Cleanup
 
-global panel := Gui("+AlwaysOnTop", "PS99 Broom Sweep")
+global panel := Gui("+AlwaysOnTop", "PS99 Broom Sweep " InstalledVersion())
 panel.SetFont("s10", "Segoe UI")
-panel.AddText("x280 y10 w80 Right", InstalledVersion())
-panel.AddText("xm y34 w350", "Broom Sweep: wait for entry, then react to cues")
+panel.AddText("w350", "Broom Sweep: wait for entry, then react to cues")
 global status := panel.AddText("xm w350", "Status: Off")
 panel.AddText("xm w350", "Start from the same lobby and camera position.")
 panel.AddButton("xm w170 h34", "Start / stop (F6)").OnEvent("Click", Toggle)
