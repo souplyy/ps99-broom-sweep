@@ -16,7 +16,8 @@ OnExit Cleanup
 
 global panel := Gui("+AlwaysOnTop", "PS99 Broom Sweep")
 panel.SetFont("s10", "Segoe UI")
-panel.AddText("w350", "Broom Sweep: wait for entry, then react to cues")
+panel.AddText("x280 y10 w80 Right", InstalledVersion())
+panel.AddText("xm y34 w350", "Broom Sweep: wait for entry, then react to cues")
 global status := panel.AddText("xm w350", "Status: Off")
 panel.AddText("xm w350", "Start from the same lobby and camera position.")
 panel.AddButton("xm w170 h34", "Start / stop (F6)").OnEvent("Click", Toggle)
@@ -26,6 +27,15 @@ panel.OnEvent("Close", (*) => ExitApp())
 panel.Show()
 F6::Toggle()
 F8::ExitApp()
+
+InstalledVersion() {
+    try {
+        contents := FileRead(A_ScriptDir "\version.json", "UTF-8")
+        if RegExMatch(contents, '"version"\s*:\s*"(\d+\.\d+\.\d+)"', &match)
+            return "v" match[1]
+    }
+    return "version unknown"
+}
 
 UpdateAndReload(*) {
     python := A_ScriptDir "\runtime\python\pythonw.exe"
