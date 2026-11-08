@@ -7,6 +7,7 @@ Thread "Interrupt", 0
 
 global running := false, phase := "off", helperPid := 0, hwnd := 0, runGeneration := 0
 global gamesPlayed := 0, updateCheckPid := 0, clickGuardRetryAt := 0, clickGuardCounter := 0
+global waitingLoadingAt := 0, transferPending := false, transferLobbyAt := 0
 global phaseAt := 0, lastSeq := "", freshAt := 0, lastCue := "", lastCueAt := 0
 global hudHits := 0, hudMissingAt := 0, lobbyHits := 0, returnHits := 0
 global returnLeftAt := 0, lobbyStableAt := 0, controllerLog := ""
@@ -120,7 +121,8 @@ Start() {
     global running, phase, helperPid, hwnd, phaseAt, lastSeq, freshAt, controllerLog, entryHits, entryAttempts, runGeneration
     global lastCue, lastCueAt, hudHits, hudMissingAt, lobbyHits, returnHits, returnLeftAt, lobbyStableAt, lastLobbyClick, lobbyClickAttempts
     global focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt, publishedPhase, magnetUsed
-    magnetUsed := false
+    global waitingLoadingAt, transferPending, transferLobbyAt
+    magnetUsed := false, waitingLoadingAt := 0, transferPending := false, transferLobbyAt := 0
     hwnd := WinExist("ahk_exe RobloxPlayerBeta.exe")
     python := A_ScriptDir "\runtime\python\pythonw.exe"
     if !FileExist(python)
@@ -291,6 +293,7 @@ Tick() {
     global phase, phaseAt, lastSeq, freshAt, lastCue, lastCueAt
     global hudHits, hudMissingAt, lobbyHits, returnHits, returnLeftAt, lobbyStableAt, lastLobbyClick, lobbyClickAttempts
     global entryHits, entryAttempts, focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt, magnetUsed, gamesPlayed
+    global waitingLoadingAt, transferPending, transferLobbyAt
     if !running
         return
     PublishPhase()
@@ -304,8 +307,17 @@ Tick() {
         focusActiveAt := 0
         if !focusPaused {
             focusPaused := true, focusPauseAt := now, focusRetryAt := now+1000, focusAttempts := 0
+            waitingLoadingAt := 0, transferLobbyAt := 0
             SendEvent "{d up}{a up}{w up}{s up}{Space up}{t up}"
             LogEvent("focus_paused", "movement released")
+        }
+        if !WinExist("ahk_id " hwnd) {
+            replacement := WinExist("ahk_exe RobloxPlayerBeta.exe")
+            if replacement && replacement != hwnd {
+                if !ReconnectRoblox(replacement)
+                    return
+                focusAttempts := 0, focusRetryAt := now+1000
+            }
         }
         if focusAttempts < 3 && now >= focusRetryAt {
             focusAttempts += 1, focusRetryAt := now+2000
@@ -321,7 +333,7 @@ Tick() {
             focusActiveAt := now
         data := ""
         try data := Trim(FileRead(helperDir "\observation.txt", "UTF-8"))
-        if !RegExMatch(data, "^(\d+)\|(none|jump|dive)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)$", &resume) || resume[1] = lastSeq {
+        if !RegExMatch(data, "^(\d+)\|(none|jump|dive)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)$", &resume) || resume[1] = lastSeq {
             if now-focusActiveAt > 10000 {
                 focusPaused := false
                 Stop("Detector did not recover after focus returned")
@@ -388,7 +400,7 @@ Tick() {
     }
     data := ""
     try data := Trim(FileRead(helperDir "\observation.txt", "UTF-8"))
-    if RegExMatch(data, "^(\d+)\|(none|jump|dive|unfocused|error)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)$", &m) && m[1] != lastSeq {
+    if RegExMatch(data, "^(\d+)\|(none|jump|dive|unfocused|error)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)$", &m) && m[1] != lastSeq {
         lastSeq := m[1]
         if m[2] = "error" {
             ; Let a transient capture error recover. The stale-data watchdog
@@ -410,6 +422,7 @@ Tick() {
                 SendEvent "{d up}{a up}{w up}{s up}"
                 LogEvent("entry_line_detected", "score=" m[11] " corrections=" entryAttempts)
                 phase := "waiting", phaseAt := now, hudHits := 0
+                waitingLoadingAt := 0, transferPending := false, transferLobbyAt := 0
                 status.Text := "Status: Green line detected; waiting for Broom Sweep"
             }
         }
@@ -423,6 +436,7 @@ Tick() {
             hudHits := hud ? hudHits+1 : 0
             if hudHits >= 2 || m[2] = "jump" || m[2] = "dive" {
                 phase := "game", phaseAt := now, hudMissingAt := 0, lobbyHits := 0, lastCue := "", lastCueAt := 0
+                waitingLoadingAt := 0, transferPending := false, transferLobbyAt := 0
                 gamesPlayed += 1
                 gameCounter.Text := "Games played: " gamesPlayed
                 LogEvent("game_started", "count=" gamesPlayed " hud=" m[3] " dive_green=" m[6] " timer=" m[7] " cue=" m[2])
@@ -437,7 +451,9 @@ Tick() {
                 }
                 if magnetCheck.Value && !magnetUsed
                     StartMagnet()
-            } else if Integer(m[10]) > 22000 {
+            } else if MaybeRecoverServerTransfer(m, now, hud) {
+                return
+            } else if Integer(m[10]) > 22000 || Integer(m[13]) = 1 {
                 status.Text := "Status: Loading game"
             } else if Integer(m[9]) >= 1200 && Integer(m[9]) <= 10000 {
                 status.Text := "Status: Player countdown or queue detected"
@@ -533,6 +549,70 @@ Tick() {
 }
 
 
+
+
+ReconnectRoblox(replacement) {
+    global hwnd, helperPid, lastSeq, freshAt, transferPending, waitingLoadingAt, transferLobbyAt
+    oldHwnd := hwnd
+    if helperPid && ProcessExist(helperPid) {
+        try ProcessClose helperPid
+        try ProcessWaitClose helperPid, 2
+    }
+    helperPid := 0
+    try FileDelete helperDir "\observation.txt"
+    python := A_ScriptDir "\runtime\python\pythonw.exe"
+    if !FileExist(python)
+        python := EnvGet("USERPROFILE") "\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\pythonw.exe"
+    try {
+        hwnd := replacement
+        Run '"' python '" "' helperDir '\live_detector.py" ' hwnd, helperDir, "Hide", &helperPid
+        lastSeq := "", freshAt := A_TickCount
+        if phase = "waiting"
+            transferPending := true, waitingLoadingAt := 0, transferLobbyAt := 0
+        LogEvent("roblox_window_replaced", "old=" oldHwnd " new=" hwnd " helper=" helperPid)
+        return true
+    } catch Error as e {
+        Stop("Could not reconnect detector: " e.Message)
+        return false
+    }
+}
+
+MaybeRecoverServerTransfer(observation, now, hud) {
+    global waitingLoadingAt, transferPending, transferLobbyAt
+    global phase, phaseAt, entryHits, entryAttempts, hudHits
+    loading := Integer(observation[13]) = 1 || Integer(observation[10]) > 22000
+    if loading {
+        transferLobbyAt := 0
+        if !waitingLoadingAt
+            waitingLoadingAt := now
+        else if !transferPending && now-waitingLoadingAt >= 800 {
+            transferPending := true
+            LogEvent("waiting_transfer_candidate", "reason=loading_screen")
+        }
+        return false
+    }
+    waitingLoadingAt := 0
+    quiet := !hud && Integer(observation[4]) < 1000 && Integer(observation[6]) < 600
+        && Integer(observation[7]) < 120 && Integer(observation[9]) < 1200
+        && Integer(observation[10]) < 12000 && Integer(observation[11]) < 650
+    if !transferPending || Integer(observation[12]) != 1 || !quiet {
+        transferLobbyAt := 0
+        return false
+    }
+    if !transferLobbyAt {
+        transferLobbyAt := now
+        LogEvent("waiting_transfer_lobby_candidate", "green=" observation[11])
+        return false
+    }
+    if now-transferLobbyAt < 4000
+        return false
+    LogEvent("waiting_transfer_reenter", "stable_ms=" (now-transferLobbyAt))
+    phase := "entry", phaseAt := now, entryHits := 0, entryAttempts := 0, hudHits := 0
+    transferPending := false, waitingLoadingAt := 0, transferLobbyAt := 0
+    SendEvent "{d down}"
+    status.Text := "Status: New server detected; entering again"
+    return true
+}
 
 MaybeResumeFromLobby(observation, now) {
     global phase, phaseAt, returnLeftAt, lobbyStableAt, entryHits, entryAttempts, magnetUsed

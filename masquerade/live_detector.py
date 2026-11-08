@@ -154,6 +154,13 @@ def lobby_spawn_visible(image):
     return int(pink.sum()) >= 10000 and home_icon_visible(frame)
 
 
+def dark_loading_visible(image):
+    """Recognize a nearly black loading frame, not normal dark scenery."""
+    frame=image if image.mode=='RGB' and image.size==(960,515) else image.convert('RGB').resize((960,515))
+    a=np.asarray(frame)[160:400,180:780]
+    return float((a.max(axis=2)<35).mean()) >= .90
+
+
 def magnet_worker():
     hwnd=int(sys.argv[2]); user=ctypes.windll.user32
     user.SetProcessDPIAware()
@@ -198,6 +205,7 @@ def main():
     safety_output=ROOT/'click-safety-result.txt'
     safety_temp=ROOT/'click-safety-result.tmp'
     last_safety_request=''
+    waiting_scan_at=0.0; waiting_entry=0.0; waiting_lobby=0
     def publish(status):
         # Windows may temporarily deny replacement while AHK has the old
         # observation open. Treat that as a dropped frame, not a capture error.
@@ -229,15 +237,26 @@ def main():
                     # Unknown is conservative, so a missing file does not
                     # silently disable any detector.
                     cue,scores=detect(frame, source_aspect=aspect) if phase in ('waiting','game','unknown') else (None,{})
-                    entry_score=entry_confirmation(frame) if phase in ('entry_check','entry_search_w','entry_search_s','entry_search_center','unknown') else 0.0
+                    if phase=='waiting':
+                        if start >= waiting_scan_at:
+                            waiting_entry=entry_confirmation(frame)
+                            waiting_lobby=int(lobby_spawn_visible(frame))
+                            waiting_scan_at=start+.3
+                        entry_score=waiting_entry
+                        lobby_spawn=waiting_lobby
+                        dark_loading=int(dark_loading_visible(frame))
+                    else:
+                        waiting_scan_at=0.0
+                        entry_score=entry_confirmation(frame) if phase in ('entry_check','entry_search_w','entry_search_s','entry_search_center','unknown') else 0.0
+                        lobby_spawn=int(lobby_spawn_visible(frame)) if phase in ('return','returning','unknown') else 0
+                        dark_loading=0
                     game,red,purple,green,timer,entry,countdown,loading=scene_info(frame)
-                    lobby_spawn=int(lobby_spawn_visible(frame)) if phase in ('return','returning','unknown') else 0
-                    status=f'{seq}|{cue or "none"}|{game}|{red}|{purple}|{green}|{timer}|{entry}|{countdown}|{loading}|{round(entry_score*1000)}|{lobby_spawn}'
+                    status=f'{seq}|{cue or "none"}|{game}|{red}|{purple}|{green}|{timer}|{entry}|{countdown}|{loading}|{round(entry_score*1000)}|{lobby_spawn}|{dark_loading}'
                     if start-last_log >= 1.0 or cue != last_cue or phase != last_phase or entry_score:
-                        f.write(json.dumps({'time':round(start-began,3),'phase':phase,'cue':cue,'scores':scores,'hud_yellow':game,'lobby_red':red,'lobby_purple':purple,'dive_green':green,'timer_white':timer,'entry_white':entry,'entry_score':round(entry_score,3),'lobby_spawn':lobby_spawn,'countdown_white':countdown,'loading_white':loading,'window':[rect.left,rect.top,rect.right,rect.bottom],'processing_ms':round((time.monotonic()-start)*1000,1)})+'\n')
+                        f.write(json.dumps({'time':round(start-began,3),'phase':phase,'cue':cue,'scores':scores,'hud_yellow':game,'lobby_red':red,'lobby_purple':purple,'dive_green':green,'timer_white':timer,'entry_white':entry,'entry_score':round(entry_score,3),'lobby_spawn':lobby_spawn,'dark_loading':dark_loading,'countdown_white':countdown,'loading_white':loading,'window':[rect.left,rect.top,rect.right,rect.bottom],'processing_ms':round((time.monotonic()-start)*1000,1)})+'\n')
                         last_log=start; last_cue=cue; last_phase=phase
                 else:
-                    status=f'{seq}|unfocused|0|0|0|0|0|0|0|0|0|0'
+                    status=f'{seq}|unfocused|0|0|0|0|0|0|0|0|0|0|0'
                 if not publish(status):
                     f.write(json.dumps({'event':'observation_busy','time':round(start-began,3)})+'\n')
                 # Respond only after the normal cue observation has been
@@ -259,7 +278,7 @@ def main():
             except Exception as e:
                 f.write(json.dumps({'event':'error','error':repr(e)})+'\n')
                 try:
-                    publish(f'{seq}|error|0|0|0|0|0|0|0|0|0|0')
+                    publish(f'{seq}|error|0|0|0|0|0|0|0|0|0|0|0')
                 except OSError as publish_error:
                     f.write(json.dumps({'event':'publish_error','error':repr(publish_error)})+'\n')
             time.sleep(max(.001,.025-(time.monotonic()-start)))
