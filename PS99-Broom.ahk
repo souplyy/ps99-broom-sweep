@@ -65,9 +65,16 @@ UpdateAndReload(*) {
 }
 
 Toggle(*) {
-    if running
-        Stop("Stopped")
-    else
+    if running {
+        ; Stop may interrupt a timer or a click routine. A full script reload
+        ; discards every suspended thread, timer, and variable before restart.
+        Critical "On"
+        Stop("Stopped; resetting")
+        Reload
+        ; Reload returns only if it could not start the replacement process.
+        status.Text := "Status: Reset failed; close and reopen the macro"
+        Critical "Off"
+    } else
         Start()
 }
 
