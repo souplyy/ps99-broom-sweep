@@ -6,6 +6,7 @@ SetKeyDelay -1, 25
 Thread "Interrupt", 0
 
 global running := false, phase := "off", helperPid := 0, hwnd := 0, runGeneration := 0
+global gamesPlayed := 0
 global phaseAt := 0, lastSeq := "", freshAt := 0, lastCue := "", lastCueAt := 0
 global hudHits := 0, hudMissingAt := 0, lobbyHits := 0, returnHits := 0
 global returnLeftAt := 0, lobbyStableAt := 0, controllerLog := ""
@@ -20,6 +21,7 @@ global panel := Gui("+AlwaysOnTop", "PS99 Broom Sweep " InstalledVersion())
 panel.SetFont("s10", "Segoe UI")
 panel.AddText("w350", "Broom Sweep: wait for entry, then react to cues")
 global status := panel.AddText("xm w350", "Status: Off")
+global gameCounter := panel.AddText("xm w350", "Games played: 0")
 panel.AddText("xm w350", "Start from the same lobby and camera position.")
 magnetSaved := 0
 try magnetSaved := IniRead(A_ScriptDir "\settings.ini", "Options", "TreatMagnet", 0)
@@ -247,7 +249,7 @@ PublishPhase() {
 Tick() {
     global phase, phaseAt, lastSeq, freshAt, lastCue, lastCueAt
     global hudHits, hudMissingAt, lobbyHits, returnHits, returnLeftAt, lobbyStableAt, lastLobbyClick, lobbyClickAttempts
-    global entryHits, entryAttempts, focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt, magnetUsed
+    global entryHits, entryAttempts, focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt, magnetUsed, gamesPlayed
     if !running
         return
     PublishPhase()
@@ -380,7 +382,9 @@ Tick() {
             hudHits := hud ? hudHits+1 : 0
             if hudHits >= 2 || m[2] = "jump" || m[2] = "dive" {
                 phase := "game", phaseAt := now, hudMissingAt := 0, lobbyHits := 0, lastCue := "", lastCueAt := 0
-                LogEvent("game_started", "hud=" m[3] " dive_green=" m[6] " timer=" m[7] " cue=" m[2])
+                gamesPlayed += 1
+                gameCounter.Text := "Games played: " gamesPlayed
+                LogEvent("game_started", "count=" gamesPlayed " hud=" m[3] " dive_green=" m[6] " timer=" m[7] " cue=" m[2])
                 status.Text := "Status: Watching JUMP and DIVE cues"
                 ; Do not miss the first prompt if it was the start signal.
                 if m[2] = "jump" || m[2] = "dive" {
