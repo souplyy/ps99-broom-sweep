@@ -13,6 +13,7 @@ global lastLobbyClick := 0, lobbyClickAttempts := 0
 global entryHits := 0, entryAttempts := 0
 global focusPaused := false, focusPauseAt := 0, focusRetryAt := 0, focusAttempts := 0, focusActiveAt := 0
 global helperDir := A_ScriptDir "\masquerade", publishedPhase := ""
+global magnetPid := 0, magnetBusy := false, magnetLastClick := 0, magnetSeq := ""
 OnExit Cleanup
 
 global panel := Gui("+AlwaysOnTop", "PS99 Broom Sweep " InstalledVersion())
@@ -20,6 +21,10 @@ panel.SetFont("s10", "Segoe UI")
 panel.AddText("w350", "Broom Sweep: wait for entry, then react to cues")
 global status := panel.AddText("xm w350", "Status: Off")
 panel.AddText("xm w350", "Start from the same lobby and camera position.")
+magnetSaved := 0
+try magnetSaved := IniRead(A_ScriptDir "\settings.ini", "Options", "TreatMagnet", 0)
+global magnetCheck := panel.AddCheckbox("xm w350 Checked" (magnetSaved = 1 ? 1 : 0), "Use Treat Magnet when ready")
+magnetCheck.OnEvent("Click", MagnetOptionChanged)
 panel.AddButton("xm w170 h34", "Start / stop (F6)").OnEvent("Click", Toggle)
 panel.AddButton("x+10 w170 h34", "Update / reload").OnEvent("Click", UpdateAndReload)
 panel.AddText("xm w350", "Auto-refocus enabled. F8 exits.")
@@ -121,9 +126,102 @@ Start() {
         freshAt := A_TickCount, lastSeq := ""
         SendEvent "{d down}"
         status.Text := "Status: Entering (D for 7.5 seconds)"
-        SetTimer Tick, 30
+        SetTimer Tick, 30, 10
+        if magnetCheck.Value
+            StartMagnet()
     } catch Error as e {
         Stop("Start failed: " e.Message)
+    }
+}
+
+
+MagnetOptionChanged(*) {
+    try IniWrite magnetCheck.Value, A_ScriptDir "\settings.ini", "Options", "TreatMagnet"
+    if !running
+        return
+    if magnetCheck.Value
+        StartMagnet()
+    else
+        StopMagnet()
+}
+
+StartMagnet() {
+    global magnetPid, magnetLastClick, magnetSeq, magnetBusy
+    if magnetPid && ProcessExist(magnetPid)
+        return
+    try FileDelete helperDir "\magnet-observation.txt"
+    python := A_ScriptDir "\runtime\python\pythonw.exe"
+    if !FileExist(python)
+        python := EnvGet("USERPROFILE") "\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\pythonw.exe"
+    try {
+        Run '"' python '" "' helperDir '\live_detector.py" --magnet ' hwnd, helperDir, "Hide", &magnetPid
+        magnetLastClick := 0, magnetSeq := "", magnetBusy := false
+        LogEvent("magnet_worker_started", "pid=" magnetPid)
+        SetTimer MagnetTick, 100, -1
+    } catch Error as e {
+        magnetPid := 0
+        LogEvent("magnet_worker_failed", e.Message)
+        MsgBox "Could not start the Treat Magnet detector: " e.Message
+    }
+}
+
+StopMagnet() {
+    global magnetPid, magnetBusy, magnetSeq
+    SetTimer MagnetTick, 0
+    if magnetPid && ProcessExist(magnetPid)
+        try ProcessClose magnetPid
+    magnetPid := 0, magnetBusy := false, magnetSeq := ""
+}
+
+MagnetTick() {
+    global magnetBusy, magnetLastClick, magnetSeq
+    if !running || !magnetCheck.Value || magnetBusy || focusPaused || !WinActive("ahk_id " hwnd)
+        return
+    ; The Lobby flow controls the mouse itself. Avoid conflicting with it.
+    if phase = "return" || phase = "returning"
+        return
+    if A_TickCount-magnetLastClick < 8000 && magnetLastClick
+        return
+    data := ""
+    try data := Trim(FileRead(helperDir "\magnet-observation.txt", "UTF-8"))
+    if !RegExMatch(data, "^(\d+)\|(-?\d+)\|(-?\d+)\|(\d+)$", &m) || m[1] = magnetSeq
+        return
+    magnetSeq := m[1]
+    x := Integer(m[2]), y := Integer(m[3]), seen := Integer(m[4])
+    if (!x && !y) || A_TickCount-seen > 1200 || A_TickCount-seen < 0
+        return
+    generation := runGeneration
+    magnetBusy := true
+    try {
+        MouseGetPos &oldX, &oldY
+        if !MoveByRelativeInput(x, y, generation) || !running || generation != runGeneration || !magnetCheck.Value || !WinActive("ahk_id " hwnd) || phase = "return" || phase = "returning"
+            return
+        latest := ""
+        try latest := Trim(FileRead(helperDir "\magnet-observation.txt", "UTF-8"))
+        if !RegExMatch(latest, "^(\d+)\|(-?\d+)\|(-?\d+)\|(\d+)$", &check)
+            return
+        age := A_TickCount-Integer(check[4])
+        if age < 0 || age > 1200 || Abs(Integer(check[2])-x) > 10 || Abs(Integer(check[3])-y) > 10
+            return
+        ; Tick has higher timer priority and can react to a cue while this
+        ; mouse routine is moving or waiting.
+        ; Keep the final focus check and mouse-down together. Cues can
+        ; interrupt again immediately after the button is pressed.
+        Critical "On"
+        if !running || generation != runGeneration || !magnetCheck.Value || !WinActive("ahk_id " hwnd) || phase = "return" || phase = "returning" {
+            Critical "Off"
+            return
+        }
+        SendInput "{LButton down}"
+        Critical "Off"
+        try Sleep 60
+        finally SendInput "{LButton up}"
+        magnetLastClick := A_TickCount
+        LogEvent("magnet_clicked", "x=" x " y=" y)
+        if running && generation = runGeneration && WinActive("ahk_id " hwnd)
+            MouseMove oldX, oldY, 0
+    } finally {
+        magnetBusy := false
     }
 }
 
@@ -473,6 +571,7 @@ Stop(message := "Off") {
         LogEvent("stop", "reason=" message)
     running := false, phase := "off"
     SetTimer Tick, 0
+    StopMagnet()
     SendEvent "{d up}{a up}{w up}{s up}{Space up}{t up}"
     if helperPid && ProcessExist(helperPid) {
         try FileAppend "stop", helperDir "\stop.request", "UTF-8"

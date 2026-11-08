@@ -69,6 +69,79 @@ def scene_info(image):
     return game_count,red_count,purple_count,dive_green,timer_white,entry_white,countdown_white,loading_white
 
 
+def _runs(mask, gap=2):
+    indices=np.flatnonzero(mask)
+    if not indices.size:
+        return []
+    cuts=np.flatnonzero(np.diff(indices)>gap+1)+1
+    return [(int(a[0]),int(a[-1])+1) for a in np.split(indices,cuts)]
+
+
+def find_ready_magnet(image):
+    """Find a ready Treat Magnet using the right-side button and label colors.
+
+    Return normalized frame coordinates, or None. A Ready label, cyan button,
+    purple icon and gold detail must all be present near one another.
+    """
+    a=np.asarray(image.convert('RGB').resize((960,515)),dtype=np.int16)
+    xbase=640
+    r,g,b=(a[:,xbase:,i] for i in range(3))
+    cyan=(r<165)&(g>150)&(b>150)&(g-r>30)&(b-r>25)
+    green=(g>155)&(g-r>55)&(g-b>35)
+    purple=(r>65)&(b>80)&(r>g*1.3)&(b>g*1.3)
+    gold=(r>150)&(g>95)&(b<90)&(r>b+50)
+    for y0,y1 in _runs(cyan.sum(axis=1)>=8):
+        if not 12 <= y1-y0 <= 100:
+            continue
+        for x0,x1 in _runs(cyan[y0:y1].sum(axis=0)>=3,gap=5):
+            w=x1-x0; h=y1-y0
+            if not 12 <= w <= 100 or not .4 <= w/h <= 2.4:
+                continue
+            area=w*h
+            if cyan[y0:y1,x0:x1].sum() < area*.13:
+                continue
+            ready=green[max(0,y0-max(10,round(h*.8))):y0,x0:x1].sum()
+            if ready < max(5,w*.16):
+                continue
+            icon=purple[y0:y1,x0:x1].sum()
+            highlight=gold[y0:y1,x0:x1].sum()
+            if icon < max(6,area*.025) or highlight < max(2,area*.004):
+                continue
+            return (xbase+(x0+x1)//2,(y0+y1)//2)
+    return None
+
+
+def magnet_worker():
+    hwnd=int(sys.argv[2]); user=ctypes.windll.user32
+    user.SetProcessDPIAware()
+    user.GetForegroundWindow.restype=wintypes.HWND
+    user.GetWindowRect.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.RECT)]
+    ctypes.windll.kernel32.GetTickCount.restype=wintypes.DWORD
+    output=ROOT/'magnet-observation.txt'; temporary=ROOT/'magnet-observation.tmp'
+    stop=ROOT/'stop.request'; seq=0
+    while not stop.exists():
+        seq+=1
+        try:
+            rect=wintypes.RECT()
+            if user.GetForegroundWindow()==hwnd and user.GetWindowRect(hwnd,ctypes.byref(rect)):
+                im=ImageGrab.grab(bbox=(rect.left,rect.top,rect.right,rect.bottom),include_layered_windows=False,all_screens=True)
+                pos=find_ready_magnet(im)
+                if pos:
+                    x=rect.left+round(pos[0]*(rect.right-rect.left)/960)
+                    y=rect.top+round(pos[1]*(rect.bottom-rect.top)/515)
+                else:
+                    x=y=0
+            else:
+                x=y=0
+            timestamp=ctypes.windll.kernel32.GetTickCount()
+            temporary.write_text(f'{seq}|{x}|{y}|{timestamp}',encoding='ascii')
+            try: os.replace(temporary,output)
+            except PermissionError: pass
+        except Exception:
+            pass
+        time.sleep(.4)
+
+
 def main():
     hwnd=int(sys.argv[1]); user=ctypes.windll.user32
     user.SetProcessDPIAware()
@@ -128,4 +201,8 @@ def main():
             time.sleep(max(.001,.025-(time.monotonic()-start)))
 
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    if len(sys.argv)>1 and sys.argv[1]=='--magnet':
+        magnet_worker()
+    else:
+        main()
