@@ -280,7 +280,7 @@ Tick() {
         if phase = "waiting" {
             hudHits := hud ? hudHits+1 : 0
             if hudHits >= 2 || m[2] = "jump" || m[2] = "dive" {
-                phase := "game", phaseAt := now, hudMissingAt := 0, lastCue := "", lastCueAt := 0
+                phase := "game", phaseAt := now, hudMissingAt := 0, lobbyHits := 0, lastCue := "", lastCueAt := 0
                 LogEvent("game_started", "hud=" m[3] " dive_green=" m[6] " timer=" m[7] " cue=" m[2])
                 status.Text := "Status: Watching JUMP and DIVE cues"
                 ; Do not miss the first prompt if it was the start signal.
@@ -303,22 +303,24 @@ Tick() {
                 status.Text := "Status: Waiting for Broom Sweep"
             }
         } else if phase = "game" {
-            ; The observed Broom Sweep timer starts at about 50 seconds. The
-            ; HUD color check does not distinguish "GAME 2" from "GAME 1".
-            ; Stop reacting after this bound even if the next HUD looks similar.
-            if now-phaseAt >= 52000 {
+            ; The HUD can disappear or look different on another display.
+            ; Keep reacting to cues until the Lobby button is confirmed, or
+            ; a generous safety limit expires to avoid playing later games.
+            lobbyHits := Integer(m[4]) > 4500 ? lobbyHits+1 : 0
+            if lobbyHits >= 3 {
+                LogEvent("waiting_for_lobby", "reason=lobby_button_confirmed red=" m[4])
                 phase := "return", phaseAt := now, lobbyHits := 0
-                LogEvent("waiting_for_lobby", "reason=round_time_elapsed")
-                status.Text := "Status: Round time elapsed; looking for Lobby button"
+                status.Text := "Status: Round ended; looking for Lobby button"
+            } else if now-phaseAt >= 75000 {
+                LogEvent("waiting_for_lobby", "reason=round_safety_timeout elapsed_ms=" (now-phaseAt))
+                phase := "return", phaseAt := now, lobbyHits := 0
+                status.Text := "Status: Round time limit; looking for Lobby button"
             }
             if hud
                 hudMissingAt := 0
-            else if !hudMissingAt
+            else if !hudMissingAt {
                 hudMissingAt := now
-            else if now-hudMissingAt > 2200 {
-                phase := "return", phaseAt := now, lobbyHits := 0
-                LogEvent("waiting_for_lobby", "reason=round_hud_missing")
-                status.Text := "Status: Round ended; looking for Lobby button"
+                LogEvent("hud_missing", "continuing_to_watch_cues")
             }
             if phase = "game" {
                 cue := m[2]
