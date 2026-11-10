@@ -8,7 +8,8 @@ Thread "Interrupt", 0
 global running := false, phase := "off", helperPid := 0, hwnd := 0, runGeneration := 0
 global gamesPlayed := 0, updateCheckPid := 0, clickGuardRetryAt := 0, clickGuardCounter := 0
 global waitingLoadingAt := 0, transferPending := false, transferLobbyAt := 0
-global entryLobbyAt := 0, entrySideRetries := 0
+global entryLobbyAt := 0, entrySideRetries := 0, entryLoadingAt := 0
+global gameStartCandidateAt := 0, gameVerified := false
 global phaseAt := 0, lastSeq := "", freshAt := 0, lastCue := "", lastCueAt := 0
 global hudHits := 0, hudMissingAt := 0, lobbyHits := 0, returnHits := 0
 global returnLeftAt := 0, lobbyStableAt := 0, controllerLog := ""
@@ -122,9 +123,11 @@ Start() {
     global running, phase, helperPid, hwnd, phaseAt, lastSeq, freshAt, controllerLog, entryHits, entryAttempts, runGeneration
     global lastCue, lastCueAt, hudHits, hudMissingAt, lobbyHits, returnHits, returnLeftAt, lobbyStableAt, lastLobbyClick, lobbyClickAttempts
     global focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt, publishedPhase, magnetUsed
-    global waitingLoadingAt, transferPending, transferLobbyAt, entryLobbyAt, entrySideRetries
+    global waitingLoadingAt, transferPending, transferLobbyAt, entryLobbyAt, entrySideRetries, entryLoadingAt
+    global gameStartCandidateAt, gameVerified
     magnetUsed := false, waitingLoadingAt := 0, transferPending := false, transferLobbyAt := 0
-    entryLobbyAt := 0, entrySideRetries := 0
+    entryLobbyAt := 0, entrySideRetries := 0, entryLoadingAt := 0
+    gameStartCandidateAt := 0, gameVerified := false
     hwnd := WinExist("ahk_exe RobloxPlayerBeta.exe")
     python := A_ScriptDir "\runtime\python\pythonw.exe"
     if !FileExist(python)
@@ -295,7 +298,8 @@ Tick() {
     global phase, phaseAt, lastSeq, freshAt, lastCue, lastCueAt
     global hudHits, hudMissingAt, lobbyHits, returnHits, returnLeftAt, lobbyStableAt, lastLobbyClick, lobbyClickAttempts
     global entryHits, entryAttempts, focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt, magnetUsed, gamesPlayed
-    global waitingLoadingAt, transferPending, transferLobbyAt, entryLobbyAt, entrySideRetries
+    global waitingLoadingAt, transferPending, transferLobbyAt, entryLobbyAt, entrySideRetries, entryLoadingAt
+    global gameStartCandidateAt, gameVerified
     if !running
         return
     PublishPhase()
@@ -309,7 +313,7 @@ Tick() {
         focusActiveAt := 0
         if !focusPaused {
             focusPaused := true, focusPauseAt := now, focusRetryAt := now+1000, focusAttempts := 0
-            waitingLoadingAt := 0, transferLobbyAt := 0
+            waitingLoadingAt := 0, transferLobbyAt := 0, entryLoadingAt := 0, gameStartCandidateAt := 0
             SendEvent "{d up}{a up}{w up}{s up}{Space up}{t up}"
             LogEvent("focus_paused", "movement released")
         }
@@ -434,13 +438,19 @@ Tick() {
             ; a loading view appears and re-enter only after the new lobby.
             loading := Integer(m[13]) = 1 || Integer(m[10]) > 22000
             if loading {
-                SendEvent "{d up}{a up}{w up}{s up}"
-                LogEvent("entry_loading_detected", "previous_phase=" phase " loading=" m[10] " dark=" m[13])
-                phase := "waiting", phaseAt := now, hudHits := 0
-                waitingLoadingAt := now, transferPending := true, transferLobbyAt := 0, entryLobbyAt := 0
-                status.Text := "Status: Loading while entering; waiting for new lobby"
-                return
-            }
+                if !entryLoadingAt
+                    entryLoadingAt := now
+                else if now-entryLoadingAt >= 300 {
+                    SendEvent "{d up}{a up}{w up}{s up}"
+                    LogEvent("entry_loading_detected", "previous_phase=" phase " loading=" m[10] " dark=" m[13] " stable_ms=" (now-entryLoadingAt))
+                    phase := "waiting", phaseAt := now, hudHits := 0
+                    waitingLoadingAt := entryLoadingAt, transferPending := true, transferLobbyAt := 0, entryLobbyAt := 0
+                    entryLoadingAt := 0, gameStartCandidateAt := 0
+                    status.Text := "Status: Loading while entering; waiting for new lobby"
+                    return
+                }
+            } else
+                entryLoadingAt := 0
             settledLobby := Integer(m[12]) = 1 && Integer(m[11]) < 650 && Integer(m[4]) < 1000
                 && Integer(m[6]) < 600 && Integer(m[7]) < 120 && Integer(m[9]) < 1200 && Integer(m[10]) < 12000
             if settledLobby {
@@ -464,11 +474,22 @@ Tick() {
         timer := Integer(m[7]) >= 120 && Integer(m[7]) <= 1000
         hudLabel := Integer(m[3]) >= 18 && Integer(m[3]) <= 180
         diveButton := Integer(m[6]) >= 600
-        hud := (timer && (hudLabel || diveButton)) || m[2] = "jump" || m[2] = "dive"
+        cuePresent := m[2] = "jump" || m[2] = "dive"
+        hud := (timer && (hudLabel || diveButton)) || cuePresent
         if phase = "waiting" {
-            hudHits := hud ? hudHits+1 : 0
-            if hudHits >= 2 || m[2] = "jump" || m[2] = "dive" {
+            ; Loading and menus can coincidentally contain white and green.
+            ; Require a clean HUD for 400 ms, or a recognized prompt itself.
+            clearScene := Integer(m[10]) < 8000 && Integer(m[9]) < 4000 && Integer(m[13]) = 0
+            startHud := timer && (hudLabel || diveButton) && clearScene
+            if startHud {
+                if !gameStartCandidateAt
+                    gameStartCandidateAt := now
+            } else
+                gameStartCandidateAt := 0
+            if cuePresent || gameStartCandidateAt && now-gameStartCandidateAt >= 400 {
                 phase := "game", phaseAt := now, hudMissingAt := 0, lobbyHits := 0, lastCue := "", lastCueAt := 0
+                gameVerified := cuePresent || hudLabel
+                gameStartCandidateAt := 0
                 waitingLoadingAt := 0, transferPending := false, transferLobbyAt := 0
                 gamesPlayed += 1
                 gameCounter.Text := "Games played: " gamesPlayed
@@ -498,6 +519,18 @@ Tick() {
                 status.Text := "Status: Waiting for Broom Sweep"
             }
         } else if phase = "game" {
+            if hudLabel || cuePresent
+                gameVerified := true
+            if !gameVerified && now-phaseAt >= 8000 {
+                LogEvent("game_start_rejected", "reason=no_hud_label_or_cue elapsed_ms=" (now-phaseAt))
+                gamesPlayed := Max(0, gamesPlayed-1)
+                gameCounter.Text := "Games played: " gamesPlayed
+                StopMagnet()
+                phase := "waiting", phaseAt := now, hudHits := 0
+                transferPending := true, waitingLoadingAt := 0, transferLobbyAt := 0, gameStartCandidateAt := 0
+                status.Text := "Status: Checking for game or returned lobby"
+                return
+            }
             ; The HUD can disappear or look different on another display.
             ; Keep reacting to cues until the Lobby button is confirmed, or
             ; a generous safety limit expires to avoid playing later games.
