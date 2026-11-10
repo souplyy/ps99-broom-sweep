@@ -8,6 +8,7 @@ Thread "Interrupt", 0
 global running := false, phase := "off", helperPid := 0, hwnd := 0, runGeneration := 0
 global gamesPlayed := 0, updateCheckPid := 0, clickGuardRetryAt := 0, clickGuardCounter := 0
 global waitingLoadingAt := 0, transferPending := false, transferLobbyAt := 0
+global entryLobbyAt := 0, entrySideRetries := 0
 global phaseAt := 0, lastSeq := "", freshAt := 0, lastCue := "", lastCueAt := 0
 global hudHits := 0, hudMissingAt := 0, lobbyHits := 0, returnHits := 0
 global returnLeftAt := 0, lobbyStableAt := 0, controllerLog := ""
@@ -121,8 +122,9 @@ Start() {
     global running, phase, helperPid, hwnd, phaseAt, lastSeq, freshAt, controllerLog, entryHits, entryAttempts, runGeneration
     global lastCue, lastCueAt, hudHits, hudMissingAt, lobbyHits, returnHits, returnLeftAt, lobbyStableAt, lastLobbyClick, lobbyClickAttempts
     global focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt, publishedPhase, magnetUsed
-    global waitingLoadingAt, transferPending, transferLobbyAt
+    global waitingLoadingAt, transferPending, transferLobbyAt, entryLobbyAt, entrySideRetries
     magnetUsed := false, waitingLoadingAt := 0, transferPending := false, transferLobbyAt := 0
+    entryLobbyAt := 0, entrySideRetries := 0
     hwnd := WinExist("ahk_exe RobloxPlayerBeta.exe")
     python := A_ScriptDir "\runtime\python\pythonw.exe"
     if !FileExist(python)
@@ -293,7 +295,7 @@ Tick() {
     global phase, phaseAt, lastSeq, freshAt, lastCue, lastCueAt
     global hudHits, hudMissingAt, lobbyHits, returnHits, returnLeftAt, lobbyStableAt, lastLobbyClick, lobbyClickAttempts
     global entryHits, entryAttempts, focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt, magnetUsed, gamesPlayed
-    global waitingLoadingAt, transferPending, transferLobbyAt
+    global waitingLoadingAt, transferPending, transferLobbyAt, entryLobbyAt, entrySideRetries
     if !running
         return
     PublishPhase()
@@ -375,11 +377,21 @@ Tick() {
         LogEvent("entry_limit", "held_d_ms=7500 waiting_for_confirmation")
         status.Text := "Status: Checking green line; waiting up to 10 seconds"
     } else if phase = "entry_check" && now-phaseAt >= 10000 {
-        entryAttempts += 1
-        phase := "entry_search_w", phaseAt := now
-        SendEvent "{w down}"
-        LogEvent("entry_search", "attempt=" entryAttempts " direction=w max_ms=1500")
-        status.Text := "Status: Searching for entry (W)"
+        ; After multiple failed searches, retry the initial sideways route
+        ; only if recent frames still look like a settled, unqueued lobby.
+        if entryAttempts >= 3 && entryLobbyAt && now-entryLobbyAt >= 3000 {
+            entrySideRetries += 1, entryAttempts := 0, entryLobbyAt := 0
+            phase := "entry", phaseAt := now
+            SendEvent "{d down}"
+            LogEvent("entry_side_retry", "retry=" entrySideRetries " reason=search_exhausted_lobby_visible")
+            status.Text := "Status: Retrying entry (D for 7.5 seconds)"
+        } else {
+            entryAttempts += 1
+            phase := "entry_search_w", phaseAt := now
+            SendEvent "{w down}"
+            LogEvent("entry_search", "attempt=" entryAttempts " direction=w max_ms=1500")
+            status.Text := "Status: Searching for entry (W)"
+        }
     } else if phase = "entry_search_w" && now-phaseAt >= 1500 {
         SendEvent "{w up}"
         phase := "entry_search_s", phaseAt := now
@@ -416,6 +428,27 @@ Tick() {
             return
         }
         freshAt := now
+        entering := phase = "entry" || phase = "entry_check" || phase = "entry_search_w" || phase = "entry_search_s" || phase = "entry_search_center"
+        if entering {
+            ; Transfers can occur while searching too. Stop moving as soon as
+            ; a loading view appears and re-enter only after the new lobby.
+            loading := Integer(m[13]) = 1 || Integer(m[10]) > 22000
+            if loading {
+                SendEvent "{d up}{a up}{w up}{s up}"
+                LogEvent("entry_loading_detected", "previous_phase=" phase " loading=" m[10] " dark=" m[13])
+                phase := "waiting", phaseAt := now, hudHits := 0
+                waitingLoadingAt := now, transferPending := true, transferLobbyAt := 0, entryLobbyAt := 0
+                status.Text := "Status: Loading while entering; waiting for new lobby"
+                return
+            }
+            settledLobby := Integer(m[12]) = 1 && Integer(m[11]) < 650 && Integer(m[4]) < 1000
+                && Integer(m[6]) < 600 && Integer(m[7]) < 120 && Integer(m[9]) < 1200 && Integer(m[10]) < 12000
+            if settledLobby {
+                if !entryLobbyAt
+                    entryLobbyAt := now
+            } else
+                entryLobbyAt := 0
+        }
         if phase = "entry_check" || phase = "entry_search_w" || phase = "entry_search_s" || phase = "entry_search_center" {
             entryHits := Integer(m[11]) >= 650 ? entryHits+1 : 0
             if entryHits >= 2 {
@@ -579,7 +612,7 @@ ReconnectRoblox(replacement) {
 
 MaybeRecoverServerTransfer(observation, now, hud) {
     global waitingLoadingAt, transferPending, transferLobbyAt
-    global phase, phaseAt, entryHits, entryAttempts, hudHits
+    global phase, phaseAt, entryHits, entryAttempts, hudHits, entryLobbyAt, entrySideRetries
     loading := Integer(observation[13]) = 1 || Integer(observation[10]) > 22000
     if loading {
         transferLobbyAt := 0
@@ -608,14 +641,14 @@ MaybeRecoverServerTransfer(observation, now, hud) {
         return false
     LogEvent("waiting_transfer_reenter", "stable_ms=" (now-transferLobbyAt))
     phase := "entry", phaseAt := now, entryHits := 0, entryAttempts := 0, hudHits := 0
-    transferPending := false, waitingLoadingAt := 0, transferLobbyAt := 0
+    transferPending := false, waitingLoadingAt := 0, transferLobbyAt := 0, entryLobbyAt := 0, entrySideRetries := 0
     SendEvent "{d down}"
     status.Text := "Status: New server detected; entering again"
     return true
 }
 
 MaybeResumeFromLobby(observation, now) {
-    global phase, phaseAt, returnLeftAt, lobbyStableAt, entryHits, entryAttempts, magnetUsed
+    global phase, phaseAt, returnLeftAt, lobbyStableAt, entryHits, entryAttempts, magnetUsed, entryLobbyAt, entrySideRetries
     red := Integer(observation[4])
     topPurple := Integer(observation[5])
     spawnEvidence := Integer(observation[12]) = 1
@@ -639,6 +672,7 @@ MaybeResumeFromLobby(observation, now) {
     LogEvent("lobby_confirmed", "spawn=" spawnEvidence " stable_ms=" (now-lobbyStableAt))
     phase := "entry", phaseAt := now
     magnetUsed := false, entryHits := 0, entryAttempts := 0, lobbyStableAt := 0
+    entryLobbyAt := 0, entrySideRetries := 0
     SendEvent "{d down}"
     status.Text := "Status: Entering again (D for 7.5 seconds)"
     return true

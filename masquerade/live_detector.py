@@ -206,6 +206,7 @@ def main():
     safety_temp=ROOT/'click-safety-result.tmp'
     last_safety_request=''
     waiting_scan_at=0.0; waiting_entry=0.0; waiting_lobby=0
+    entry_lobby_scan_at=0.0; entry_lobby=0
     def publish(status):
         # Windows may temporarily deny replacement while AHK has the old
         # observation open. Treat that as a dropped frame, not a capture error.
@@ -248,8 +249,16 @@ def main():
                     else:
                         waiting_scan_at=0.0
                         entry_score=entry_confirmation(frame) if phase in ('entry_check','entry_search_w','entry_search_s','entry_search_center','unknown') else 0.0
-                        lobby_spawn=int(lobby_spawn_visible(frame)) if phase in ('return','returning','unknown') else 0
-                        dark_loading=0
+                        if phase in ('entry','entry_check','entry_search_w','entry_search_s','entry_search_center'):
+                            if start >= entry_lobby_scan_at:
+                                entry_lobby=int(lobby_spawn_visible(frame))
+                                entry_lobby_scan_at=start+.4
+                            lobby_spawn=entry_lobby
+                            dark_loading=int(dark_loading_visible(frame))
+                        else:
+                            entry_lobby_scan_at=0.0
+                            lobby_spawn=int(lobby_spawn_visible(frame)) if phase in ('return','returning','unknown') else 0
+                            dark_loading=0
                     game,red,purple,green,timer,entry,countdown,loading=scene_info(frame)
                     status=f'{seq}|{cue or "none"}|{game}|{red}|{purple}|{green}|{timer}|{entry}|{countdown}|{loading}|{round(entry_score*1000)}|{lobby_spawn}|{dark_loading}'
                     if start-last_log >= 1.0 or cue != last_cue or phase != last_phase or entry_score:
