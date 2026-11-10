@@ -18,6 +18,9 @@ global entryHits := 0, entryAttempts := 0
 global focusPaused := false, focusPauseAt := 0, focusRetryAt := 0, focusAttempts := 0, focusActiveAt := 0
 global helperDir := A_ScriptDir "\masquerade", publishedPhase := ""
 global magnetPid := 0, magnetBusy := false, magnetLastClick := 0, magnetSeq := "", magnetUsed := false
+global broomPid := 0, broomBusy := false, broomUsed := false, broomSeq := "", mouseAutomationBusy := false
+global roundCandidate := 0, roundHits := 0, eventRound := 0, eventRoundAt := 0
+global game2StartedAt := 0, game2Direction := "", game2MoveAt := 0, game2JumpAt := 0
 OnExit Cleanup
 
 global panel := Gui("+AlwaysOnTop", "PS99 Broom Sweep " InstalledVersion())
@@ -30,6 +33,18 @@ magnetSaved := 0
 try magnetSaved := IniRead(A_ScriptDir "\settings.ini", "Options", "TreatMagnet", 0)
 global magnetCheck := panel.AddCheckbox("xm w350 Checked" (magnetSaved = 1 ? 1 : 0), "Use Treat Magnet when ready")
 magnetCheck.OnEvent("Click", MagnetOptionChanged)
+broomSaved := 0, broomAfterSaved := 0, surviveSaved := 0
+try broomSaved := IniRead(A_ScriptDir "\settings.ini", "Options", "UseBroomstick", 0)
+try broomAfterSaved := Integer(IniRead(A_ScriptDir "\settings.ini", "Options", "BroomAfter", 0))
+try surviveSaved := IniRead(A_ScriptDir "\settings.ini", "Options", "SurviveGame2", 0)
+broomAfterSaved := Max(0, Min(2, broomAfterSaved))
+global broomCheck := panel.AddCheckbox("xm w350 Checked" (broomSaved = 1 ? 1 : 0), "Use Broomstick")
+broomCheck.OnEvent("Click", BroomOptionsChanged)
+panel.AddText("xm y+6", "Use after game:")
+global broomAfter := panel.AddDropDownList("x+8 w85 Choose" (broomAfterSaved+1), ["0", "1", "2"])
+broomAfter.OnEvent("Change", BroomOptionsChanged)
+global surviveCheck := panel.AddCheckbox("xm w350 Checked" (surviveSaved = 1 ? 1 : 0), "Game 2: jump and move back and forth")
+surviveCheck.OnEvent("Click", BroomOptionsChanged)
 panel.AddButton("xm w170 h34", "Start / stop (F6)").OnEvent("Click", Toggle)
 global updateButton := panel.AddButton("x+10 w170 h34", "Update / reload")
 updateButton.OnEvent("Click", UpdateAndReload)
@@ -124,10 +139,11 @@ Start() {
     global lastCue, lastCueAt, hudHits, hudMissingAt, lobbyHits, returnHits, returnLeftAt, lobbyStableAt, lastLobbyClick, lobbyClickAttempts, lobbyClickSent, lobbyCandidateAt
     global focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt, publishedPhase, magnetUsed
     global waitingLoadingAt, transferPending, transferLobbyAt, entryLobbyAt, entrySideRetries, entryLoadingAt
-    global gameStartCandidateAt, gameVerified
+    global gameStartCandidateAt, gameVerified, broomUsed, eventRound, eventRoundAt, roundCandidate, roundHits
     magnetUsed := false, waitingLoadingAt := 0, transferPending := false, transferLobbyAt := 0
     entryLobbyAt := 0, entrySideRetries := 0, entryLoadingAt := 0
     gameStartCandidateAt := 0, gameVerified := false
+    broomUsed := false, eventRound := 0, eventRoundAt := 0, roundCandidate := 0, roundHits := 0
     hwnd := WinExist("ahk_exe RobloxPlayerBeta.exe")
     python := A_ScriptDir "\runtime\python\pythonw.exe"
     if !FileExist(python)
@@ -168,11 +184,196 @@ Start() {
         SendEvent "{d down}"
         status.Text := "Status: Entering (D for 7.5 seconds)"
         SetTimer Tick, 30, 10
+        if broomCheck.Value || surviveCheck.Value
+            StartBroomWorker()
     } catch Error as e {
         Stop("Start failed: " e.Message)
     }
 }
 
+
+
+BroomOptionsChanged(*) {
+    global phase, phaseAt, lobbyHits
+    try IniWrite broomCheck.Value, A_ScriptDir "\settings.ini", "Options", "UseBroomstick"
+    try IniWrite broomAfter.Value-1, A_ScriptDir "\settings.ini", "Options", "BroomAfter"
+    try IniWrite surviveCheck.Value, A_ScriptDir "\settings.ini", "Options", "SurviveGame2"
+    if !running
+        return
+    if broomCheck.Value || surviveCheck.Value
+        StartBroomWorker()
+    else {
+        StopBroomWorker()
+        StopGame2Movement()
+        if phase = "broom_wait" || phase = "game2" {
+            phase := "return", phaseAt := A_TickCount, lobbyHits := 0
+        }
+    }
+    if !surviveCheck.Value
+        StopGame2Movement()
+    else if phase = "game2"
+        SetTimer Game2Tick, 150, -1
+}
+
+StartBroomWorker() {
+    global broomPid, broomSeq
+    if broomPid && ProcessExist(broomPid)
+        return
+    try FileDelete helperDir "\broom-observation.txt"
+    python := A_ScriptDir "\runtime\python\pythonw.exe"
+    if !FileExist(python)
+        python := EnvGet("USERPROFILE") "\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\pythonw.exe"
+    try {
+        Run '"' python '" "' helperDir '\live_detector.py" --broom ' hwnd, helperDir, "Hide", &broomPid
+        broomSeq := ""
+        LogEvent("broom_worker_started", "pid=" broomPid)
+        SetTimer BroomTick, 120, -1
+    } catch Error as e {
+        broomPid := 0
+        LogEvent("broom_worker_failed", e.Message)
+        status.Text := "Status: Broom detector could not start"
+    }
+}
+
+StopBroomWorker() {
+    global broomPid, broomBusy, broomSeq
+    SetTimer BroomTick, 0
+    if broomPid && ProcessExist(broomPid)
+        try ProcessClose broomPid
+    broomPid := 0, broomBusy := false, broomSeq := ""
+}
+
+StopGame2Movement() {
+    global game2Direction, game2MoveAt, game2JumpAt
+    SetTimer Game2Tick, 0
+    if game2Direction != ""
+        SendEvent "{a up}{d up}{Space up}"
+    game2Direction := "", game2MoveAt := 0, game2JumpAt := 0
+}
+
+Game2Tick() {
+    global game2Direction, game2MoveAt, game2JumpAt
+    if !running || phase != "game2" || !surviveCheck.Value || focusPaused || !WinActive("ahk_id " hwnd)
+        return
+    now := A_TickCount
+    if now-game2StartedAt >= 90000 {
+        StopGame2Movement()
+        status.Text := "Status: Game 2 time limit; waiting for next game"
+        return
+    }
+    if !game2MoveAt || now-game2MoveAt >= 1500 {
+        if game2Direction = "a" {
+            SendEvent "{a up}{d down}"
+            game2Direction := "d"
+        } else {
+            SendEvent "{d up}{a down}"
+            game2Direction := "a"
+        }
+        game2MoveAt := now
+    }
+    if !game2JumpAt || now-game2JumpAt >= 350 {
+        SendEvent "{Space}"
+        game2JumpAt := now
+    }
+}
+
+BroomTick() {
+    global broomSeq, broomBusy, broomUsed, roundCandidate, roundHits, eventRound, eventRoundAt, mouseAutomationBusy
+    global phase, phaseAt, game2StartedAt, lobbyHits
+    if !running || focusPaused || !WinActive("ahk_id " hwnd) || broomBusy
+        return
+    if phase != "waiting" && phase != "game" && phase != "game2" && phase != "broom_wait"
+        return
+    data := ""
+    try data := Trim(FileRead(helperDir "\broom-observation.txt", "UTF-8"))
+    if !RegExMatch(data, "^(\d+)\|([0-3])\|(-?\d+)\|(-?\d+)\|(\d+)$", &m) || m[1] = broomSeq
+        return
+    broomSeq := m[1]
+    now := A_TickCount, age := now-Integer(m[5]), seenRound := Integer(m[2])
+    if age < 0 || age > 2000
+        return
+    if seenRound > 0 {
+        if seenRound = roundCandidate
+            roundHits += 1
+        else
+            roundCandidate := seenRound, roundHits := 1
+        if roundHits >= 2 && seenRound >= eventRound {
+            if seenRound != eventRound
+                LogEvent("event_round_detected", "round=" seenRound)
+            eventRound := seenRound, eventRoundAt := now
+        }
+    } else
+        roundHits := 0
+    if !eventRound || now-eventRoundAt > 3000
+        return
+    after := broomAfter.Value-1
+    keepGame2 := surviveCheck.Value || (broomCheck.Value && after = 2 && !broomUsed)
+    if eventRound = 2 && keepGame2 && (phase = "game" || phase = "broom_wait") {
+        phase := "game2", phaseAt := now, game2StartedAt := now
+        StopMagnet()
+        LogEvent("game2_started", "survival=" surviveCheck.Value)
+        status.Text := surviveCheck.Value ? "Status: Game 2: moving and jumping" : "Status: Waiting through game 2"
+        if surviveCheck.Value
+            SetTimer Game2Tick, 150, -1
+    }
+    if eventRound >= 3 && phase = "game2" {
+        StopGame2Movement()
+        phase := "broom_wait", phaseAt := now
+        LogEvent("game2_finished", "round=" eventRound)
+        status.Text := "Status: Game 2 ended"
+    }
+    if eventRound >= 3 && phase = "broom_wait" && (!broomCheck.Value || broomUsed) {
+        phase := "return", phaseAt := now, lobbyHits := 0
+        status.Text := "Status: Looking for Lobby button"
+        return
+    }
+    if !broomCheck.Value || broomUsed || mouseAutomationBusy || eventRound != after+1 || A_TickCount < clickGuardRetryAt
+        return
+    if after = 0 && phase != "waiting" && phase != "game"
+        return
+    if after > 0 && phase != "game" && phase != "game2" && phase != "broom_wait"
+        return
+    x := Integer(m[3]), y := Integer(m[4])
+    if !x && !y
+        return
+    generation := runGeneration
+    broomBusy := true, mouseAutomationBusy := true
+    try {
+        MouseGetPos &oldX, &oldY
+        if !MoveByRelativeInput(x,y,generation) || !running || generation != runGeneration || !broomCheck.Value || broomUsed || !WinActive("ahk_id " hwnd)
+            return
+        if !ClickGuard(generation)
+            return
+        latest := ""
+        try latest := Trim(FileRead(helperDir "\broom-observation.txt", "UTF-8"))
+        if !RegExMatch(latest, "^(\d+)\|([0-3])\|(-?\d+)\|(-?\d+)\|(\d+)$", &check)
+            return
+        latestAge := A_TickCount-Integer(check[5])
+        if latestAge < 0 || latestAge > 2000 || Integer(check[2]) != after+1 || Abs(Integer(check[3])-x)>10 || Abs(Integer(check[4])-y)>10
+            return
+        Critical "On"
+        validPhase := after = 0 ? (phase = "waiting" || phase = "game") : (phase = "game" || phase = "game2" || phase = "broom_wait")
+        if !running || generation != runGeneration || !broomCheck.Value || broomUsed || !WinActive("ahk_id " hwnd) || !validPhase {
+            Critical "Off"
+            return
+        }
+        SendInput "{LButton down}"
+        broomUsed := true
+        Critical "Off"
+        try Sleep 60
+        finally SendInput "{LButton up}"
+        LogEvent("broom_clicked", "after=" after " round=" eventRound " x=" x " y=" y)
+        if running && generation = runGeneration && WinActive("ahk_id " hwnd)
+            MouseMove oldX,oldY,0
+        if after > 0 && !(after = 1 && surviveCheck.Value) {
+            StopGame2Movement()
+            phase := "return", phaseAt := A_TickCount, lobbyHits := 0
+            status.Text := "Status: Broomstick used; looking for Lobby"
+        }
+    } finally {
+        broomBusy := false, mouseAutomationBusy := false
+    }
+}
 
 MagnetOptionChanged(*) {
     try IniWrite magnetCheck.Value, A_ScriptDir "\settings.ini", "Options", "TreatMagnet"
@@ -213,8 +414,8 @@ StopMagnet() {
 }
 
 MagnetTick() {
-    global magnetBusy, magnetLastClick, magnetSeq, magnetUsed
-    if !running || !magnetCheck.Value || magnetUsed || magnetBusy || focusPaused || !WinActive("ahk_id " hwnd) || A_TickCount < clickGuardRetryAt
+    global magnetBusy, magnetLastClick, magnetSeq, magnetUsed, mouseAutomationBusy
+    if !running || !magnetCheck.Value || magnetUsed || magnetBusy || mouseAutomationBusy || focusPaused || !WinActive("ahk_id " hwnd) || A_TickCount < clickGuardRetryAt
         return
     ; Use it only near the beginning of the first minigame, once per run.
     if phase != "game" || A_TickCount-phaseAt > 15000 {
@@ -230,7 +431,7 @@ MagnetTick() {
     if (!x && !y) || A_TickCount-seen > 1200 || A_TickCount-seen < 0
         return
     generation := runGeneration
-    magnetBusy := true
+    magnetBusy := true, mouseAutomationBusy := true
     try {
         MouseGetPos &oldX, &oldY
         if !MoveByRelativeInput(x, y, generation) || !running || generation != runGeneration || !magnetCheck.Value || !WinActive("ahk_id " hwnd) || phase != "game" || A_TickCount-phaseAt > 15000 || magnetUsed
@@ -272,7 +473,7 @@ MagnetTick() {
         if running && generation = runGeneration && WinActive("ahk_id " hwnd)
             MouseMove oldX, oldY, 0
     } finally {
-        magnetBusy := false
+        magnetBusy := false, mouseAutomationBusy := false
     }
 }
 
@@ -537,13 +738,25 @@ Tick() {
             ; a generous safety limit expires to avoid playing later games.
             lobbyHits := Integer(m[4]) > 4500 ? lobbyHits+1 : 0
             if lobbyHits >= 3 {
-                LogEvent("waiting_for_lobby", "reason=lobby_button_confirmed red=" m[4])
-                phase := "return", phaseAt := now, lobbyHits := 0
-                status.Text := "Status: Round ended; looking for Lobby button"
+                if surviveCheck.Value || (broomCheck.Value && broomAfter.Value > 1 && !broomUsed) {
+                    LogEvent("waiting_next_game", "reason=round_end red=" m[4])
+                    phase := "broom_wait", phaseAt := now, lobbyHits := 0
+                    status.Text := "Status: Waiting for the next game"
+                } else {
+                    LogEvent("waiting_for_lobby", "reason=lobby_button_confirmed red=" m[4])
+                    phase := "return", phaseAt := now, lobbyHits := 0
+                    status.Text := "Status: Round ended; looking for Lobby button"
+                }
             } else if now-phaseAt >= 75000 {
-                LogEvent("waiting_for_lobby", "reason=round_safety_timeout elapsed_ms=" (now-phaseAt))
-                phase := "return", phaseAt := now, lobbyHits := 0
-                status.Text := "Status: Round time limit; looking for Lobby button"
+                if surviveCheck.Value || (broomCheck.Value && broomAfter.Value > 1 && !broomUsed) {
+                    LogEvent("waiting_next_game", "reason=round_time_elapsed")
+                    phase := "broom_wait", phaseAt := now
+                    status.Text := "Status: Waiting for the next game"
+                } else {
+                    LogEvent("waiting_for_lobby", "reason=round_safety_timeout elapsed_ms=" (now-phaseAt))
+                    phase := "return", phaseAt := now, lobbyHits := 0
+                    status.Text := "Status: Round time limit; looking for Lobby button"
+                }
             }
             if hud
                 hudMissingAt := 0
@@ -564,6 +777,15 @@ Tick() {
                 } else if cue = "none" && now-lastCueAt > 250
                     lastCue := ""
             }
+        } else if phase = "game2" || phase = "broom_wait" {
+            ; Without a confirmed next-round label, do not guess when to use
+            ; the broom. Release movement and return after a generous limit.
+            if now-phaseAt >= 120000 {
+                StopGame2Movement()
+                LogEvent("waiting_next_game_timeout", "phase=" phase)
+                phase := "return", phaseAt := now, lobbyHits := 0
+                status.Text := "Status: Next game not confirmed; looking for Lobby"
+            }
         } else if phase = "return" {
             if MaybeResumeFromLobby(m, now)
                 return
@@ -582,6 +804,8 @@ Tick() {
             } else
                 lobbyCandidateAt := 0
             if lobbyCandidateAt && now-lobbyCandidateAt >= 1500 {
+                if mouseAutomationBusy
+                    return
                 if !ClickLobbyButton(m[4]) || !running || tickGeneration != runGeneration
                     return
                 phase := "returning", phaseAt := A_TickCount, returnHits := 0
@@ -636,6 +860,10 @@ ReconnectRoblox(replacement) {
     try {
         hwnd := replacement
         Run '"' python '" "' helperDir '\live_detector.py" ' hwnd, helperDir, "Hide", &helperPid
+        if broomCheck.Value || surviveCheck.Value {
+            StopBroomWorker()
+            StartBroomWorker()
+        }
         lastSeq := "", freshAt := A_TickCount
         if phase = "waiting"
             transferPending := true, waitingLoadingAt := 0, transferLobbyAt := 0
@@ -686,6 +914,7 @@ MaybeRecoverServerTransfer(observation, now, hud) {
 
 MaybeResumeFromLobby(observation, now) {
     global phase, phaseAt, returnLeftAt, lobbyStableAt, entryHits, entryAttempts, magnetUsed, entryLobbyAt, entrySideRetries
+    global broomUsed, eventRound, eventRoundAt, roundCandidate, roundHits
     red := Integer(observation[4])
     topPurple := Integer(observation[5])
     spawnEvidence := Integer(observation[12]) = 1
@@ -709,6 +938,7 @@ MaybeResumeFromLobby(observation, now) {
     LogEvent("lobby_confirmed", "spawn=" spawnEvidence " stable_ms=" (now-lobbyStableAt))
     phase := "entry", phaseAt := now
     magnetUsed := false, entryHits := 0, entryAttempts := 0, lobbyStableAt := 0
+    broomUsed := false, eventRound := 0, eventRoundAt := 0, roundCandidate := 0, roundHits := 0
     entryLobbyAt := 0, entrySideRetries := 0
     SendEvent "{d down}"
     status.Text := "Status: Entering again (D for 7.5 seconds)"
@@ -850,6 +1080,8 @@ Stop(message := "Off") {
         LogEvent("stop", "reason=" message)
     running := false, phase := "off"
     SetTimer Tick, 0
+    StopGame2Movement()
+    StopBroomWorker()
     StopMagnet()
     SendEvent "{d up}{a up}{w up}{s up}{Space up}{t up}"
     if helperPid && ProcessExist(helperPid) {

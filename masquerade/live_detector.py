@@ -1,5 +1,9 @@
 """Watch the Roblox window and publish broom-cue observations locally."""
 import ctypes
+import base64
+import re
+import subprocess
+import traceback
 from ctypes import wintypes
 from datetime import datetime
 import json
@@ -9,7 +13,7 @@ import sys
 import time
 
 import numpy as np
-from PIL import ImageGrab
+from PIL import Image, ImageGrab
 from prompt_detector import detect
 
 ROOT=Path(__file__).resolve().parent
@@ -116,6 +120,48 @@ def find_ready_magnet(image):
     return None
 
 
+# Shape sample from the provided broomstick button. It only describes the
+# dark central broom silhouette; colors and Ready label are checked separately.
+_BROOM_ROWS = ['000000000000000000000000', '000000000000000000000000', '000000000000000011000000', '000000000000000011100000', '000000000000000001100000', '000000000000011100100000', '000000000000011100000000', '000000000000000000000000', '000000000001110000000000', '000000000011100000000000', '000000000010000000000000', '000000000010000000000000', '000000000111000000000000', '000000000111000000000000', '000000111110000000000000', '000001111110000000000000', '000111111110000000000000', '000001110000000000000000', '000001110000000000000000', '000000000000000000000000', '000000000000000000000000', '000000000000000000000000', '000000000000000000000000', '000000000000000000000000']
+_BROOM_SHAPE=np.array([[c=='1' for c in row] for row in _BROOM_ROWS],dtype=bool)
+_BROOM_REGION=np.zeros((24,24),dtype=bool)
+_BROOM_REGION[2:19,2:22]=True
+
+
+def find_ready_broom(image, include_box=False):
+    """Locate the ready broom, distinguishing it from adjacent power-ups."""
+    frame=image.convert('RGB').resize((960,515))
+    a=np.asarray(frame,dtype=np.int16)
+    xbase=640
+    r,g,b=(a[:,xbase:,i] for i in range(3))
+    cyan=(r<165)&(g>150)&(b>150)&(g-r>30)&(b-r>25)
+    green=(g>155)&(g-r>55)&(g-b>35)
+    candidates=[]
+    for y0,y1 in _runs(cyan.sum(axis=1)>=8):
+        if not 12<=y1-y0<=100:
+            continue
+        for x0,x1 in _runs(cyan[y0:y1].sum(axis=0)>=3,gap=5):
+            w=x1-x0;h=y1-y0
+            if not 12<=w<=100 or not .4<=w/h<=2.4:
+                continue
+            if cyan[y0:y1,x0:x1].sum()<w*h*.13:
+                continue
+            ready=green[max(0,y0-max(10,round(h*.8))):y0,x0:x1].sum()
+            if ready<max(5,w*.16):
+                continue
+            patch=frame.crop((xbase+x0,y0,xbase+x1,y1)).resize((24,24))
+            dark=(np.asarray(patch).max(axis=2)<105)&_BROOM_REGION
+            score=2*int((dark&_BROOM_SHAPE).sum())/(int(dark.sum())+int(_BROOM_SHAPE.sum())+1)
+            if score>=.55:
+                candidates.append((score,xbase+(x0+x1)//2,(y0+y1)//2,xbase+x0,y0,xbase+x1,y1))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    if len(candidates)>1 and candidates[0][0]-candidates[1][0]<.10:
+        return None
+    return candidates[0][1:] if include_box else candidates[0][1:3]
+
+
 def home_icon_visible(image):
     """Recognize the red-roofed, yellow-door home icon in the lower center.
 
@@ -192,6 +238,100 @@ def magnet_worker():
         time.sleep(.4)
 
 
+_OCR_SCRIPT='Add-Type -AssemblyName System.Runtime.WindowsRuntime\n[Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime] | Out-Null\n[Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime] | Out-Null\n[Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType = WindowsRuntime] | Out-Null\n$script:AsTaskOp = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq \'AsTask\' -and $_.IsGenericMethod -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq \'IAsyncOperation`1\' } | Select-Object -First 1)\nfunction AwaitOp($op, $type) {\n    $task = $script:AsTaskOp.MakeGenericMethod($type).Invoke($null,@($op))\n    $task.Wait()\n    $task.Result\n}\n$engine=[Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()\nwhile ($null -ne ($line=[Console]::ReadLine())) {\n    try {\n        $file=AwaitOp ([Windows.Storage.StorageFile]::GetFileFromPathAsync($line)) ([Windows.Storage.StorageFile])\n        $stream=AwaitOp ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])\n        $decoder=AwaitOp ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])\n        $bitmap=AwaitOp ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])\n        $result=AwaitOp ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])\n        $text=$result.Text -replace "[\\r\\n|]",\' \'\n        $bitmap.Dispose();$stream.Dispose()\n        [Console]::WriteLine($text)\n    } catch { [Console]::WriteLine(\'ERROR \'+$_.Exception.Message) }\n}\n'
+
+
+def parse_event_round(text):
+    match=re.search(r'\bGAME\s*([123])\s*(?:OF|0F)\s*[6G]\b',text.upper())
+    return int(match.group(1)) if match else 0
+
+
+def broom_worker():
+    """Read the round label and broom independently from jump/dive capture."""
+    hwnd=int(sys.argv[2]);user=ctypes.windll.user32
+    user.SetProcessDPIAware()
+    user.GetForegroundWindow.restype=wintypes.HWND
+    user.GetWindowRect.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.RECT)]
+    ctypes.windll.kernel32.GetTickCount.restype=wintypes.DWORD
+    output=ROOT/'broom-observation.txt';temporary=ROOT/'broom-observation.tmp'
+    crop_path=None;label_path=None
+    stop=ROOT/'stop.request';seq=0
+    diagnostic=ROOT/('broom-ability-'+datetime.now().strftime('%Y%m%d-%H%M%S')+'.jsonl')
+    previous=None;last_diagnostic=0.0
+    def report(event, **details):
+        try:
+            with diagnostic.open('a',encoding='utf8') as out:
+                out.write(json.dumps({'time':round(time.monotonic(),3),'event':event,**details})+'\n')
+        except OSError:
+            pass
+    encoded=base64.b64encode(_OCR_SCRIPT.encode('utf-16le')).decode('ascii')
+    proc=None
+    try:
+        proc=subprocess.Popen(['powershell.exe','-NoProfile','-NonInteractive','-EncodedCommand',encoded],
+            stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+            text=True,encoding='utf8',errors='replace',bufsize=1,creationflags=0x08000000)
+        while not stop.exists():
+            start=time.monotonic();seq+=1
+            crop_path=ROOT/('broom-counter-'+str(os.getpid())+'-'+str(seq)+'.png')
+            label_path=ROOT/('broom-label-'+str(os.getpid())+'-'+str(seq)+'.png')
+            try:
+                rect=wintypes.RECT();round_no=0;x=y=0
+                if user.GetForegroundWindow()==hwnd and user.GetWindowRect(hwnd,ctypes.byref(rect)):
+                    im=ImageGrab.grab(bbox=(rect.left,rect.top,rect.right,rect.bottom),include_layered_windows=False,all_screens=True).convert('RGB')
+                    w,h=im.size
+                    crop=im.crop((round(w*.35),0,round(w*.65),round(h*.20)))
+                    if crop.width<600:
+                        crop=crop.resize((600,round(crop.height*600/max(1,crop.width))))
+                    crop.save(crop_path)
+                    proc.stdin.write(str(crop_path)+'\n');proc.stdin.flush()
+                    response=proc.stdout.readline()
+                    if not response and proc.poll() is not None:
+                        break
+                    round_no=parse_event_round(response)
+                    if response.startswith('ERROR'):
+                        report('ocr_error',error=response.strip())
+                    pos=find_ready_broom(im,include_box=True)
+                    if pos:
+                        cx,cy,x0,y0,x1,y1=pos
+                        pad=round((x1-x0)*.8)
+                        xlo=max(0,round((x0-pad)*w/960));xhi=min(w,round((x1+pad)*w/960))
+                        ylo=max(0,round((y1-2)*h/515));yhi=min(h,round((y1+(y1-y0)*.95)*h/515))
+                        if xhi>xlo and yhi>ylo:
+                            label=im.crop((xlo,ylo,xhi,yhi))
+                            label=label.resize((max(450,label.width),round(label.height*max(450,label.width)/max(1,label.width))))
+                            label.save(label_path)
+                            proc.stdin.write(str(label_path)+'\n');proc.stdin.flush()
+                            label_text=proc.stdout.readline().upper().replace('0','O').replace('1','I').replace('5','S')
+                            if re.search(r'\bBROOM\s*STICK\b',label_text):
+                                x=rect.left+round(cx*(rect.right-rect.left)/960)
+                                y=rect.top+round(cy*(rect.bottom-rect.top)/515)
+                timestamp=ctypes.windll.kernel32.GetTickCount()
+                state=(round_no,bool(x or y))
+                if state != previous or start-last_diagnostic >= 5:
+                    report('observation',round=round_no,broom_ready=state[1])
+                    previous=state;last_diagnostic=start
+                temporary.write_text(f'{seq}|{round_no}|{x}|{y}|{timestamp}',encoding='ascii')
+                try:os.replace(temporary,output)
+                except PermissionError:pass
+            except Exception as exc:
+                report('worker_error',error=repr(exc),traceback=traceback.format_exc())
+            finally:
+                for temp_image in (crop_path,label_path):
+                    try:temp_image.unlink(missing_ok=True)
+                    except OSError:pass
+            time.sleep(max(.05,.6-(time.monotonic()-start)))
+    finally:
+        if proc:
+            try:proc.stdin.close()
+            except Exception:pass
+            try:proc.terminate()
+            except Exception:pass
+        for temp_image in (crop_path,label_path):
+            if temp_image:
+                try:temp_image.unlink(missing_ok=True)
+                except OSError:pass
+
+
 def main():
     hwnd=int(sys.argv[1]); user=ctypes.windll.user32
     user.SetProcessDPIAware()
@@ -232,7 +372,7 @@ def main():
                         phase=phase_file.read_text(encoding='ascii').strip()
                     except (OSError, UnicodeError):
                         phase='unknown'
-                    if phase not in ('entry','entry_check','entry_search_w','entry_search_s','entry_search_center','waiting','game','return','returning'):
+                    if phase not in ('entry','entry_check','entry_search_w','entry_search_s','entry_search_center','waiting','game','game2','broom_wait','return','returning'):
                         phase='unknown'
                     # Match only signals that can affect the current phase.
                     # Unknown is conservative, so a missing file does not
@@ -296,5 +436,7 @@ def main():
 if __name__=='__main__':
     if len(sys.argv)>1 and sys.argv[1]=='--magnet':
         magnet_worker()
+    elif len(sys.argv)>1 and sys.argv[1]=='--broom':
+        broom_worker()
     else:
         main()
