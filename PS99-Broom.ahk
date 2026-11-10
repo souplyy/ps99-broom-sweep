@@ -20,7 +20,7 @@ global helperDir := A_ScriptDir "\masquerade", publishedPhase := ""
 global magnetPid := 0, magnetBusy := false, magnetLastClick := 0, magnetSeq := "", magnetUsed := false
 global broomPid := 0, broomBusy := false, broomUsed := false, broomSeq := "", mouseAutomationBusy := false
 global roundCandidate := 0, roundHits := 0, eventRound := 0, eventRoundAt := 0
-global game2StartedAt := 0, game2Direction := "", game2MoveAt := 0, game2JumpAt := 0
+global game2StartedAt := 0, game2Direction := "", game2MoveAt := 0, game2JumpAt := 0, game2LobbyAt := 0
 OnExit Cleanup
 
 global panel := Gui("+AlwaysOnTop", "PS99 Broom Sweep " InstalledVersion())
@@ -140,11 +140,11 @@ Start() {
     global lastCue, lastCueAt, hudHits, hudMissingAt, lobbyHits, returnHits, returnLeftAt, lobbyStableAt, lastLobbyClick, lobbyClickAttempts, lobbyClickSent, lobbyCandidateAt
     global focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt, publishedPhase, magnetUsed
     global waitingLoadingAt, transferPending, transferLobbyAt, entryLobbyAt, entrySideRetries, entryLoadingAt
-    global gameStartCandidateAt, gameVerified, broomUsed, eventRound, eventRoundAt, roundCandidate, roundHits
+    global gameStartCandidateAt, gameVerified, broomUsed, eventRound, eventRoundAt, roundCandidate, roundHits, game2LobbyAt
     magnetUsed := false, waitingLoadingAt := 0, transferPending := false, transferLobbyAt := 0
     entryLobbyAt := 0, entrySideRetries := 0, entryLoadingAt := 0
     gameStartCandidateAt := 0, gameVerified := false
-    broomUsed := false, eventRound := 0, eventRoundAt := 0, roundCandidate := 0, roundHits := 0
+    broomUsed := false, eventRound := 0, eventRoundAt := 0, roundCandidate := 0, roundHits := 0, game2LobbyAt := 0
     hwnd := WinExist("ahk_exe RobloxPlayerBeta.exe")
     python := A_ScriptDir "\runtime\python\pythonw.exe"
     if !FileExist(python)
@@ -262,7 +262,7 @@ Game2Tick() {
         status.Text := "Status: Game 2 time limit; waiting for next game"
         return
     }
-    if !game2MoveAt || now-game2MoveAt >= 1500 {
+    if !game2MoveAt || now-game2MoveAt >= 3000 {
         if game2Direction = "a" {
             SendEvent "{a up}{d down}"
             game2Direction := "d"
@@ -280,7 +280,7 @@ Game2Tick() {
 
 BroomTick() {
     global broomSeq, broomBusy, broomUsed, roundCandidate, roundHits, eventRound, eventRoundAt, mouseAutomationBusy
-    global phase, phaseAt, game2StartedAt, lobbyHits
+    global phase, phaseAt, game2StartedAt, lobbyHits, game2LobbyAt
     if !running || focusPaused || !WinActive("ahk_id " hwnd) || broomBusy
         return
     if phase != "waiting" && phase != "game" && phase != "game2" && phase != "broom_wait"
@@ -310,7 +310,7 @@ BroomTick() {
     after := broomAfter.Value-1
     keepGame2 := surviveCheck.Value || (broomCheck.Value && after = 2 && !broomUsed)
     if eventRound = 2 && keepGame2 && (phase = "game" || phase = "broom_wait") {
-        phase := "game2", phaseAt := now, game2StartedAt := now
+        phase := "game2", phaseAt := now, game2StartedAt := now, game2LobbyAt := 0
         StopMagnet()
         LogEvent("game2_started", "survival=" surviveCheck.Value)
         status.Text := surviveCheck.Value ? "Status: Game 2: moving and jumping" : "Status: Waiting through game 2"
@@ -779,6 +779,8 @@ Tick() {
                     lastCue := ""
             }
         } else if phase = "game2" || phase = "broom_wait" {
+            if DetectGame2Elimination(m, now)
+                return
             ; Without a confirmed next-round label, do not guess when to use
             ; the broom. Release movement and return after a generous limit.
             if now-phaseAt >= 120000 {
@@ -845,6 +847,29 @@ Tick() {
 
 
 
+
+
+DetectGame2Elimination(observation, now) {
+    global game2LobbyAt, phase, phaseAt, lobbyHits
+    ; Require a sustained Lobby-button signal. A transient red animation
+    ; should not stop movement or cause an accidental click.
+    lobbyVisible := Integer(observation[4]) > 4500 && Integer(observation[12]) != 1
+    if !lobbyVisible {
+        game2LobbyAt := 0
+        return false
+    }
+    if !game2LobbyAt {
+        game2LobbyAt := now
+        return false
+    }
+    if now-game2LobbyAt < 800
+        return false
+    StopGame2Movement()
+    LogEvent("game2_lobby_detected", "red=" observation[4] " stable_ms=" (now-game2LobbyAt) " phase=" phase)
+    phase := "return", phaseAt := now, lobbyHits := 0, game2LobbyAt := 0
+    status.Text := "Status: Eliminated; returning to lobby"
+    return true
+}
 
 ReconnectRoblox(replacement) {
     global hwnd, helperPid, lastSeq, freshAt, transferPending, waitingLoadingAt, transferLobbyAt
