@@ -13,7 +13,7 @@ global gameStartCandidateAt := 0, gameVerified := false
 global phaseAt := 0, lastSeq := "", freshAt := 0, lastCue := "", lastCueAt := 0
 global hudHits := 0, hudMissingAt := 0, lobbyHits := 0, returnHits := 0
 global returnLeftAt := 0, lobbyStableAt := 0, controllerLog := ""
-global lastLobbyClick := 0, lobbyClickAttempts := 0
+global lastLobbyClick := 0, lobbyClickAttempts := 0, lobbyClickSent := false, lobbyCandidateAt := 0
 global entryHits := 0, entryAttempts := 0
 global focusPaused := false, focusPauseAt := 0, focusRetryAt := 0, focusAttempts := 0, focusActiveAt := 0
 global helperDir := A_ScriptDir "\masquerade", publishedPhase := ""
@@ -121,7 +121,7 @@ Toggle(*) {
 
 Start() {
     global running, phase, helperPid, hwnd, phaseAt, lastSeq, freshAt, controllerLog, entryHits, entryAttempts, runGeneration
-    global lastCue, lastCueAt, hudHits, hudMissingAt, lobbyHits, returnHits, returnLeftAt, lobbyStableAt, lastLobbyClick, lobbyClickAttempts
+    global lastCue, lastCueAt, hudHits, hudMissingAt, lobbyHits, returnHits, returnLeftAt, lobbyStableAt, lastLobbyClick, lobbyClickAttempts, lobbyClickSent, lobbyCandidateAt
     global focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt, publishedPhase, magnetUsed
     global waitingLoadingAt, transferPending, transferLobbyAt, entryLobbyAt, entrySideRetries, entryLoadingAt
     global gameStartCandidateAt, gameVerified
@@ -159,7 +159,7 @@ Start() {
         PublishPhase()
         lastCue := "", lastCueAt := 0, hudHits := 0, hudMissingAt := 0
         lobbyHits := 0, returnHits := 0, returnLeftAt := 0, lobbyStableAt := 0
-        lastLobbyClick := 0, lobbyClickAttempts := 0
+        lastLobbyClick := 0, lobbyClickAttempts := 0, lobbyClickSent := false, lobbyCandidateAt := 0
         entryHits := 0, entryAttempts := 0
         focusPaused := false, focusPauseAt := 0, focusRetryAt := 0, focusAttempts := 0, focusActiveAt := 0
         controllerLog := helperDir "\controller-" FormatTime(, "yyyyMMdd-HHmmss") "-" DllCall("GetCurrentProcessId") ".log"
@@ -296,7 +296,7 @@ PublishPhase() {
 
 Tick() {
     global phase, phaseAt, lastSeq, freshAt, lastCue, lastCueAt
-    global hudHits, hudMissingAt, lobbyHits, returnHits, returnLeftAt, lobbyStableAt, lastLobbyClick, lobbyClickAttempts
+    global hudHits, hudMissingAt, lobbyHits, returnHits, returnLeftAt, lobbyStableAt, lastLobbyClick, lobbyClickAttempts, lobbyClickSent, lobbyCandidateAt
     global entryHits, entryAttempts, focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt, magnetUsed, gamesPlayed
     global waitingLoadingAt, transferPending, transferLobbyAt, entryLobbyAt, entrySideRetries, entryLoadingAt
     global gameStartCandidateAt, gameVerified
@@ -489,6 +489,7 @@ Tick() {
             if cuePresent || gameStartCandidateAt && now-gameStartCandidateAt >= 400 {
                 phase := "game", phaseAt := now, hudMissingAt := 0, lobbyHits := 0, lastCue := "", lastCueAt := 0
                 gameVerified := cuePresent || hudLabel
+                lobbyClickSent := false, lobbyCandidateAt := 0
                 gameStartCandidateAt := 0
                 waitingLoadingAt := 0, transferPending := false, transferLobbyAt := 0
                 gamesPlayed += 1
@@ -566,34 +567,37 @@ Tick() {
         } else if phase = "return" {
             if MaybeResumeFromLobby(m, now)
                 return
-            lobbyHits := Integer(m[4]) > 4500 ? lobbyHits+1 : 0
-            if lobbyHits >= 3 {
+            ; Never send another Lobby click for a game after one has been
+            ; sent, even if the view changes or the click routine is interrupted.
+            if lobbyClickSent {
+                lobbyCandidateAt := 0
+                status.Text := "Status: Lobby click sent; waiting for lobby"
+                return
+            }
+            likelyButton := Integer(m[4]) > 4500 && Integer(m[12]) != 1
+                && Integer(m[10]) < 12000 && m[2] = "none"
+            if likelyButton {
+                if !lobbyCandidateAt
+                    lobbyCandidateAt := now
+            } else
+                lobbyCandidateAt := 0
+            if lobbyCandidateAt && now-lobbyCandidateAt >= 1500 {
                 if !ClickLobbyButton(m[4]) || !running || tickGeneration != runGeneration
                     return
                 phase := "returning", phaseAt := A_TickCount, returnHits := 0
                 returnLeftAt := 0, lobbyStableAt := 0
-                lastLobbyClick := phaseAt, lobbyClickAttempts := 1
+                lastLobbyClick := phaseAt, lobbyClickAttempts := 1, lobbyCandidateAt := 0
                 status.Text := "Status: Returning to lobby"
             }
         } else if phase = "returning" {
-            ; First ensure the red Lobby button has actually disappeared.
-            if Integer(m[4]) < 1000 {
-                if !returnLeftAt {
-                    returnLeftAt := now
-                    LogEvent("lobby_button_disappeared", "red=" m[4])
-                }
-            } else {
-                returnLeftAt := 0, lobbyStableAt := 0
-                status.Text := "Status: Waiting for Lobby click to take effect"
-                if now-lastLobbyClick >= 8000 && lobbyClickAttempts < 3 {
-                    LogEvent("lobby_click_retry", "attempt=" (lobbyClickAttempts+1) " red=" m[4])
-                    if !ClickLobbyButton(m[4]) || !running || tickGeneration != runGeneration
-                        return
-                    lobbyClickAttempts += 1
-                    lastLobbyClick := A_TickCount, phaseAt := lastLobbyClick
-                } else if lobbyClickAttempts >= 3
-                    status.Text := "Status: Lobby still visible; click it manually or press F6"
+            ; Do not retry a click based on fluctuating red scenery: the home
+            ; button can occupy the same coordinates as the Lobby button.
+            if Integer(m[4]) < 1000 && !returnLeftAt {
+                returnLeftAt := now
+                LogEvent("lobby_button_disappeared", "red=" m[4])
             }
+            if !returnLeftAt && now-lastLobbyClick >= 8000
+                status.Text := "Status: Lobby click unconfirmed; check Roblox"
             if MaybeResumeFromLobby(m, now)
                 return
             if returnLeftAt {
@@ -685,11 +689,11 @@ MaybeResumeFromLobby(observation, now) {
     red := Integer(observation[4])
     topPurple := Integer(observation[5])
     spawnEvidence := Integer(observation[12]) = 1
-    quiet := red < 1000 && Integer(observation[6]) < 600 && Integer(observation[7]) < 120
+    quiet := Integer(observation[6]) < 600 && Integer(observation[7]) < 120
         && Integer(observation[9]) < 1200 && Integer(observation[10]) < 12000
     ; The lower-screen evidence can also recover if the Lobby click succeeded
     ; but the controller missed the transition to the "returning" phase.
-    oldEvidence := phase = "returning" && returnLeftAt && now-returnLeftAt >= 1500 && topPurple > 8000
+    oldEvidence := red < 1000 && phase = "returning" && returnLeftAt && now-returnLeftAt >= 1500 && topPurple > 8000
     candidate := quiet && now-phaseAt >= 12000 && (spawnEvidence || oldEvidence)
     if !candidate {
         lobbyStableAt := 0
@@ -756,7 +760,8 @@ ClickGuard(generation) {
 }
 
 ClickLobbyButton(redCount) {
-    if A_TickCount < clickGuardRetryAt
+    global lobbyClickSent
+    if lobbyClickSent || A_TickCount < clickGuardRetryAt
         return false
     clickGeneration := runGeneration
     WinGetPos &wx, &wy, &ww, &wh, "ahk_id " hwnd
@@ -790,7 +795,15 @@ ClickLobbyButton(redCount) {
     try fresh := Trim(FileRead(helperDir "\observation.txt", "UTF-8"))
     if !RegExMatch(fresh, "^\d+\|(?:none|jump|dive)\|\d+\|(\d+)\|", &check) || Integer(check[1]) <= 4500
         return false
+    ; Latch before yielding so an interrupted click can never be repeated.
+    Critical "On"
+    if lobbyClickSent || !running || clickGeneration != runGeneration || !WinActive("ahk_id " hwnd) {
+        Critical "Off"
+        return false
+    }
     SendInput "{LButton down}"
+    lobbyClickSent := true
+    Critical "Off"
     try Sleep 60
     finally SendInput "{LButton up}"
     LogEvent("lobby_click_sent", "x=" actualX " y=" actualY)
