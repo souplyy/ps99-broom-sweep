@@ -251,7 +251,7 @@ def elimination_candidate(image):
     a=np.asarray(frame,dtype=np.int16)
     r,g,b=(a[20:75,310:650,i] for i in range(3))
     pink=(r>190)&(g<100)&(b>60)&(b<190)&(r>g+100)
-    return int(pink.sum())>=600 and scene_info(frame)[1]>4500
+    return int(pink.sum()), scene_info(frame)[1]
 
 
 def prepare_reward_image(image):
@@ -297,7 +297,7 @@ def broom_worker():
     crop_path=None;label_path=None;elim_path=None;reward_path=None
     stop=ROOT/'stop.request';seq=0
     diagnostic=ROOT/('broom-ability-'+datetime.now().strftime('%Y%m%d-%H%M%S')+'.jsonl')
-    previous=None;last_diagnostic=0.0
+    previous=None;last_diagnostic=0.0;last_stats_diagnostic=0.0
     def report(event, **details):
         try:
             with diagnostic.open('a',encoding='utf8') as out:
@@ -355,21 +355,35 @@ def broom_worker():
                             if re.search(r'\bBROOM\s*STICK\b',label_text):
                                 x=rect.left+round(cx*(rect.right-rect.left)/960)
                                 y=rect.top+round(cy*(rect.bottom-rect.top)/515)
-                    if elimination_candidate(im):
-                        header=im.crop((round(w*.32),round(h*.03),round(w*.68),round(h*.14)))
-                        if header.width<600:
-                            header=header.resize((600,round(header.height*600/max(1,header.width))))
+                    # The lobby button can appear even when the pink heading is dim,
+                    # occluded, or rendered differently on another display. Use it to
+                    # trigger OCR, then require the elimination heading before counting.
+                    pink_count,red_count=elimination_candidate(im)
+                    if red_count>4500:
+                        header=im.crop((round(w*.24),round(h*.015),round(w*.76),round(h*.20)))
+                        if header.width<900:
+                            header=header.resize((900,round(header.height*900/max(1,header.width))))
                         header.save(elim_path)
                         proc.stdin.write(str(elim_path)+'\n');proc.stdin.flush()
                         header_text=proc.stdout.readline().strip().upper()
-                        if re.search(r'\bELIMINATED\b',header_text):
+                        compact=re.sub(r'[^A-Z]','',header_text)
+                        if 'ELIMINATED' in compact or ('ELIMINAT' in compact and pink_count>=300):
                             eliminated=1
                             reward_image=prepare_reward_image(im)
                             if reward_image:
                                 reward_image.save(reward_path)
                                 proc.stdin.write(str(reward_path)+'\n');proc.stdin.flush()
-                                reward_text=proc.stdout.readline()
+                                reward_text=proc.stdout.readline().strip()
                                 reward=parse_reward(reward_text)
+                            else:
+                                reward_text=''
+                        if start-last_stats_diagnostic>=2:
+                            report('stats_screen_check',pink=pink_count,red=red_count,header=header_text,
+                                   eliminated=eliminated,reward=reward,
+                                   reward_text=reward_text if eliminated else '')
+                            last_stats_diagnostic=start
+                            if not eliminated or reward<0:
+                                im.save(ROOT/'stats-debug-last.png')
                 timestamp=ctypes.windll.kernel32.GetTickCount()
                 state=(round_no,bool(x or y))
                 if state != previous or start-last_diagnostic >= 5:
