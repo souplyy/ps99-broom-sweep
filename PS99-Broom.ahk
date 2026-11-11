@@ -350,6 +350,7 @@ BroomTick() {
     if !x && !y
         return
     generation := runGeneration
+    LogEvent("broom_candidate", "x=" x " y=" y " round=" eventRound)
     Critical "On"
     if mouseAutomationBusy {
         Critical "Off"
@@ -370,6 +371,11 @@ BroomTick() {
         latestAge := A_TickCount-Integer(check[5])
         if latestAge < 0 || latestAge > 2000 || Integer(check[2]) != after+1 || Abs(Integer(check[3])-x)>10 || Abs(Integer(check[4])-y)>10
             return
+        MouseGetPos &actualX, &actualY
+        if Abs(actualX-x)>3 || Abs(actualY-y)>3 {
+            LogEvent("broom_click_cancelled", "reason=cursor_moved x=" actualX " y=" actualY)
+            return
+        }
         Critical "On"
         validPhase := after = 0 ? (phase = "waiting" || phase = "game") : (phase = "game" || phase = "game2" || phase = "broom_wait")
         if !running || generation != runGeneration || !broomCheck.Value || broomUsed || !WinActive("ahk_id " hwnd) || !validPhase {
@@ -511,6 +517,7 @@ MagnetTick() {
     if (!x && !y) || A_TickCount-seen > 1200 || A_TickCount-seen < 0
         return
     generation := runGeneration
+    LogEvent("magnet_candidate", "x=" x " y=" y)
     Critical "On"
     if mouseAutomationBusy {
         Critical "Off"
@@ -539,6 +546,11 @@ MagnetTick() {
         age := A_TickCount-Integer(check[4])
         if age < 0 || age > 1200 || Abs(Integer(check[2])-x) > 10 || Abs(Integer(check[3])-y) > 10
             return
+        MouseGetPos &actualX, &actualY
+        if Abs(actualX-x)>3 || Abs(actualY-y)>3 {
+            LogEvent("magnet_click_cancelled", "reason=cursor_moved x=" actualX " y=" actualY)
+            return
+        }
         ; Tick has higher timer priority and can react to a cue while this
         ; mouse routine is moving or waiting.
         ; Keep the final focus check and mouse-down together. Cues can

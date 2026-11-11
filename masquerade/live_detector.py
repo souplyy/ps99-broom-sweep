@@ -90,13 +90,13 @@ def find_ready_magnet(image):
     a=np.asarray(image.convert('RGB').resize((960,515)),dtype=np.int16)
     xbase=640
     r,g,b=(a[:,xbase:,i] for i in range(3))
-    cyan=(r<165)&(g>150)&(b>150)&(g-r>30)&(b-r>25)
-    green=(g>155)&(g-r>55)&(g-b>35)
-    purple=(r>65)&(b>80)&(r>g*1.3)&(b>g*1.3)
-    gold=(r>150)&(g>95)&(b<90)&(r>b+50)
+    cyan=(r<165)&(g>115)&(b>115)&(g-r>24)&(b-r>20)
+    green=(g>120)&(g-r>45)&(g-b>28)
+    purple=(r>50)&(b>60)&(r>g*1.3)&(b>g*1.3)
+    gold=(r>110)&(g>70)&(b<90)&(r>b+38)
     # The Lucky Charm is orange, while the magnet has vivid purple/magenta
     # across its icon. Generic dark purple backgrounds are not sufficient.
-    magenta=(r>110)&(b>120)&(r>g*1.6)&(b>g*1.6)
+    magenta=(r>80)&(b>90)&(r>g*1.6)&(b>g*1.6)
     broom=find_ready_broom(image,include_box=True)
     for y0,y1 in _runs(cyan.sum(axis=1)>=8):
         if not 12 <= y1-y0 <= 100:
