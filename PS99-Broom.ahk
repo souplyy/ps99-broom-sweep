@@ -315,6 +315,10 @@ BroomTick() {
         roundHits := 0
     if !eventRound || now-eventRoundAt > 3000
         return
+    ; Both power-ups may be ready before game 1 begins. Start each detector
+    ; independently, and serialize only the actual mouse interaction.
+    if eventRound = 1 && magnetCheck.Value && !magnetUsed && (phase = "waiting" || phase = "game" && now-phaseAt <= 30000)
+        StartMagnet()
     after := broomAfter.Value-1
     keepGame2 := surviveCheck.Value || (broomCheck.Value && after = 2 && !broomUsed)
     if eventRound = 2 && keepGame2 && (phase = "game" || phase = "broom_wait") {
@@ -346,7 +350,13 @@ BroomTick() {
     if !x && !y
         return
     generation := runGeneration
+    Critical "On"
+    if mouseAutomationBusy {
+        Critical "Off"
+        return
+    }
     broomBusy := true, mouseAutomationBusy := true
+    Critical "Off"
     try {
         MouseGetPos &oldX, &oldY
         if !MoveByRelativeInput(x,y,generation) || !running || generation != runGeneration || !broomCheck.Value || broomUsed || !WinActive("ahk_id " hwnd)
@@ -448,7 +458,7 @@ MagnetOptionChanged(*) {
     try IniWrite magnetCheck.Value, A_ScriptDir "\settings.ini", "Options", "TreatMagnet"
     if !running
         return
-    if magnetCheck.Value && phase = "game" && !magnetUsed && A_TickCount-phaseAt <= 15000
+    if magnetCheck.Value && !magnetUsed && (phase = "waiting" && eventRound = 1 || phase = "game" && A_TickCount-phaseAt <= 30000)
         StartMagnet()
     else if !magnetCheck.Value
         StopMagnet()
@@ -486,8 +496,9 @@ MagnetTick() {
     global magnetBusy, magnetLastClick, magnetSeq, magnetUsed, mouseAutomationBusy
     if !running || !magnetCheck.Value || magnetUsed || magnetBusy || mouseAutomationBusy || focusPaused || !WinActive("ahk_id " hwnd) || A_TickCount < clickGuardRetryAt
         return
-    ; Use it only near the beginning of the first minigame, once per run.
-    if phase != "game" || A_TickCount-phaseAt > 15000 {
+    ; A ready magnet may appear before game 1 starts. Keep watching through
+    ; its early gameplay, but never use another one in the same event.
+    if !(phase = "waiting" && eventRound = 1 || phase = "game" && A_TickCount-phaseAt <= 30000) {
         StopMagnet()
         return
     }
@@ -500,10 +511,16 @@ MagnetTick() {
     if (!x && !y) || A_TickCount-seen > 1200 || A_TickCount-seen < 0
         return
     generation := runGeneration
+    Critical "On"
+    if mouseAutomationBusy {
+        Critical "Off"
+        return
+    }
     magnetBusy := true, mouseAutomationBusy := true
+    Critical "Off"
     try {
         MouseGetPos &oldX, &oldY
-        if !MoveByRelativeInput(x, y, generation) || !running || generation != runGeneration || !magnetCheck.Value || !WinActive("ahk_id " hwnd) || phase != "game" || A_TickCount-phaseAt > 15000 || magnetUsed
+        if !MoveByRelativeInput(x, y, generation) || !running || generation != runGeneration || !magnetCheck.Value || !WinActive("ahk_id " hwnd) || !(phase = "waiting" && eventRound = 1 || phase = "game" && A_TickCount-phaseAt <= 30000) || magnetUsed
             return
         latest := ""
         try latest := Trim(FileRead(helperDir "\magnet-observation.txt", "UTF-8"))
@@ -527,7 +544,7 @@ MagnetTick() {
         ; Keep the final focus check and mouse-down together. Cues can
         ; interrupt again immediately after the button is pressed.
         Critical "On"
-        if !running || generation != runGeneration || !magnetCheck.Value || !WinActive("ahk_id " hwnd) || phase != "game" || A_TickCount-phaseAt > 15000 || magnetUsed {
+        if !running || generation != runGeneration || !magnetCheck.Value || !WinActive("ahk_id " hwnd) || !(phase = "waiting" && eventRound = 1 || phase = "game" && A_TickCount-phaseAt <= 30000) || magnetUsed {
             Critical "Off"
             return
         }

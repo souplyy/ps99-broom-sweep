@@ -97,6 +97,7 @@ def find_ready_magnet(image):
     # The Lucky Charm is orange, while the magnet has vivid purple/magenta
     # across its icon. Generic dark purple backgrounds are not sufficient.
     magenta=(r>110)&(b>120)&(r>g*1.6)&(b>g*1.6)
+    broom=find_ready_broom(image,include_box=True)
     for y0,y1 in _runs(cyan.sum(axis=1)>=8):
         if not 12 <= y1-y0 <= 100:
             continue
@@ -116,7 +117,12 @@ def find_ready_magnet(image):
                 continue
             if magenta[y0:y1,x0:x1].sum() < max(4,area*.04):
                 continue
-            return (xbase+(x0+x1)//2,(y0+y1)//2)
+            cx,cy=xbase+(x0+x1)//2,(y0+y1)//2
+            # A broom can share the magnet's purple and gold colours. Do not
+            # consume the first matching candidate if it is the broom itself.
+            if broom and broom[2]<=cx<=broom[4] and broom[3]<=cy<=broom[5]:
+                continue
+            return (cx,cy)
     return None
 
 
