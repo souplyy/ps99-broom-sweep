@@ -13,7 +13,7 @@ import sys
 import time
 
 import numpy as np
-from PIL import Image, ImageGrab
+from PIL import Image, ImageDraw, ImageFont, ImageGrab, ImageOps
 from prompt_detector import detect
 
 ROOT=Path(__file__).resolve().parent
@@ -242,8 +242,47 @@ _OCR_SCRIPT='Add-Type -AssemblyName System.Runtime.WindowsRuntime\n[Windows.Medi
 
 
 def parse_event_round(text):
-    match=re.search(r'\bGAME\s*([123])\s*(?:OF|0F)\s*[6G]\b',text.upper())
+    match=re.search(r'\bGAME\s*([123])\s*(?:OF|0F)(?:\s*[6G])?\b',text.upper())
     return int(match.group(1)) if match else 0
+
+
+def elimination_candidate(image):
+    frame=image.convert('RGB').resize((960,515))
+    a=np.asarray(frame,dtype=np.int16)
+    r,g,b=(a[20:75,310:650,i] for i in range(3))
+    pink=(r>190)&(g<100)&(b>60)&(b<190)&(r>g+100)
+    return int(pink.sum())>=600 and scene_info(frame)[1]>4500
+
+
+def prepare_reward_image(image):
+    """High-contrast reward digits with a synthetic word to help OCR find them."""
+    w,h=image.size
+    crop=image.convert('RGB').crop((round(w*.34),round(h*.34),round(w*.46),round(h*.48))).convert('L')
+    mask=crop.point(lambda value: 0 if value>180 else 255)
+    bbox=ImageOps.invert(mask).getbbox()
+    if not bbox:
+        return None
+    digits=mask.crop(bbox)
+    if digits.width<3 or digits.height<5:
+        return None
+    digits=digits.resize((max(1,round(digits.width*60/digits.height)),60))
+    canvas=Image.new('L',(digits.width+220,110),255)
+    try:
+        font=ImageFont.truetype('arialbd.ttf',35)
+    except OSError:
+        font=ImageFont.load_default()
+    ImageDraw.Draw(canvas).text((10,30),'TREATS',font=font,fill=0)
+    canvas.paste(digits,(200,20))
+    return canvas
+
+
+def parse_reward(text):
+    text=text.strip().upper()
+    if re.search(r'\d[.]\d|\d\s*[KMB]\b',text):
+        return -1
+    text=text.replace(',', '')
+    found=re.findall(r'(?<![A-Z0-9])\d{1,7}(?![A-Z0-9])',text)
+    return int(found[0]) if len(found)==1 else -1
 
 
 def broom_worker():
@@ -254,7 +293,8 @@ def broom_worker():
     user.GetWindowRect.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.RECT)]
     ctypes.windll.kernel32.GetTickCount.restype=wintypes.DWORD
     output=ROOT/'broom-observation.txt';temporary=ROOT/'broom-observation.tmp'
-    crop_path=None;label_path=None
+    stats_output=ROOT/'stats-observation.txt';stats_temp=ROOT/'stats-observation.tmp'
+    crop_path=None;label_path=None;elim_path=None;reward_path=None
     stop=ROOT/'stop.request';seq=0
     diagnostic=ROOT/('broom-ability-'+datetime.now().strftime('%Y%m%d-%H%M%S')+'.jsonl')
     previous=None;last_diagnostic=0.0
@@ -274,23 +314,33 @@ def broom_worker():
             start=time.monotonic();seq+=1
             crop_path=ROOT/('broom-counter-'+str(os.getpid())+'-'+str(seq)+'.png')
             label_path=ROOT/('broom-label-'+str(os.getpid())+'-'+str(seq)+'.png')
+            elim_path=ROOT/('elim-header-'+str(os.getpid())+'-'+str(seq)+'.png')
+            reward_path=ROOT/('elim-reward-'+str(os.getpid())+'-'+str(seq)+'.png')
             try:
-                rect=wintypes.RECT();round_no=0;x=y=0
+                rect=wintypes.RECT();round_no=0;x=y=0;eliminated=0;reward=-1
                 if user.GetForegroundWindow()==hwnd and user.GetWindowRect(hwnd,ctypes.byref(rect)):
+                    try:
+                        current_phase=(ROOT/'phase.txt').read_text(encoding='ascii').strip()
+                    except (OSError,UnicodeError):
+                        current_phase='unknown'
+                    if current_phase in ('entry','entry_check','entry_search_w','entry_search_s','entry_search_center'):
+                        time.sleep(.6)
+                        continue
                     im=ImageGrab.grab(bbox=(rect.left,rect.top,rect.right,rect.bottom),include_layered_windows=False,all_screens=True).convert('RGB')
                     w,h=im.size
-                    crop=im.crop((round(w*.35),0,round(w*.65),round(h*.20)))
-                    if crop.width<600:
-                        crop=crop.resize((600,round(crop.height*600/max(1,crop.width))))
-                    crop.save(crop_path)
-                    proc.stdin.write(str(crop_path)+'\n');proc.stdin.flush()
-                    response=proc.stdout.readline()
-                    if not response and proc.poll() is not None:
-                        break
-                    round_no=parse_event_round(response)
-                    if response.startswith('ERROR'):
-                        report('ocr_error',error=response.strip())
-                    pos=find_ready_broom(im,include_box=True)
+                    if current_phase not in ('return','returning'):
+                        crop=im.crop((round(w*.35),0,round(w*.65),round(h*.20)))
+                        if crop.width<600:
+                            crop=crop.resize((600,round(crop.height*600/max(1,crop.width))))
+                        crop.save(crop_path)
+                        proc.stdin.write(str(crop_path)+'\n');proc.stdin.flush()
+                        response=proc.stdout.readline()
+                        if not response and proc.poll() is not None:
+                            break
+                        round_no=parse_event_round(response)
+                        if response.startswith('ERROR'):
+                            report('ocr_error',error=response.strip())
+                    pos=find_ready_broom(im,include_box=True) if current_phase not in ('return','returning') else None
                     if pos:
                         cx,cy,x0,y0,x1,y1=pos
                         pad=round((x1-x0)*.8)
@@ -305,6 +355,21 @@ def broom_worker():
                             if re.search(r'\bBROOM\s*STICK\b',label_text):
                                 x=rect.left+round(cx*(rect.right-rect.left)/960)
                                 y=rect.top+round(cy*(rect.bottom-rect.top)/515)
+                    if elimination_candidate(im):
+                        header=im.crop((round(w*.32),round(h*.03),round(w*.68),round(h*.14)))
+                        if header.width<600:
+                            header=header.resize((600,round(header.height*600/max(1,header.width))))
+                        header.save(elim_path)
+                        proc.stdin.write(str(elim_path)+'\n');proc.stdin.flush()
+                        header_text=proc.stdout.readline().strip().upper()
+                        if re.search(r'\bELIMINATED\b',header_text):
+                            eliminated=1
+                            reward_image=prepare_reward_image(im)
+                            if reward_image:
+                                reward_image.save(reward_path)
+                                proc.stdin.write(str(reward_path)+'\n');proc.stdin.flush()
+                                reward_text=proc.stdout.readline()
+                                reward=parse_reward(reward_text)
                 timestamp=ctypes.windll.kernel32.GetTickCount()
                 state=(round_no,bool(x or y))
                 if state != previous or start-last_diagnostic >= 5:
@@ -313,10 +378,15 @@ def broom_worker():
                 temporary.write_text(f'{seq}|{round_no}|{x}|{y}|{timestamp}',encoding='ascii')
                 try:os.replace(temporary,output)
                 except PermissionError:pass
+                stats_temp.write_text(f'{seq}|{eliminated}|{reward}|{timestamp}',encoding='ascii')
+                try:os.replace(stats_temp,stats_output)
+                except PermissionError:pass
+                if eliminated:
+                    report('elimination_observed',reward=reward)
             except Exception as exc:
                 report('worker_error',error=repr(exc),traceback=traceback.format_exc())
             finally:
-                for temp_image in (crop_path,label_path):
+                for temp_image in (crop_path,label_path,elim_path,reward_path):
                     try:temp_image.unlink(missing_ok=True)
                     except OSError:pass
             time.sleep(max(.05,.6-(time.monotonic()-start)))
@@ -326,7 +396,7 @@ def broom_worker():
             except Exception:pass
             try:proc.terminate()
             except Exception:pass
-        for temp_image in (crop_path,label_path):
+        for temp_image in (crop_path,label_path,elim_path,reward_path):
             if temp_image:
                 try:temp_image.unlink(missing_ok=True)
                 except OSError:pass

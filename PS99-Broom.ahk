@@ -7,6 +7,9 @@ Thread "Interrupt", 0
 
 global running := false, phase := "off", helperPid := 0, hwnd := 0, runGeneration := 0
 global gamesPlayed := 0, updateCheckPid := 0, clickGuardRetryAt := 0, clickGuardCounter := 0
+global statsDeaths := [0,0,0], statsUnknownDeaths := 0, statsTreats := 0, statsUnverified := 0
+global statsRound := 0, statsSeq := "", statsDeathHits := 0, statsDeathLatched := false
+global statsRewardCandidate := -1, statsRewardHits := 0, statsRewardAdded := false
 global waitingLoadingAt := 0, transferPending := false, transferLobbyAt := 0
 global entryLobbyAt := 0, entrySideRetries := 0, entryLoadingAt := 0
 global gameStartCandidateAt := 0, gameVerified := false
@@ -28,6 +31,8 @@ panel.SetFont("s10", "Segoe UI")
 panel.AddText("w350", "Broom Sweep: wait for entry, then react to cues")
 global status := panel.AddText("xm w350", "Status: Off")
 global gameCounter := panel.AddText("xm w350", "Games played: 0")
+global deathsDisplay := panel.AddText("xm w350", "Deaths - R1: 0   R2: 0   R3: 0")
+global treatsDisplay := panel.AddText("xm w350", "Treats earned: 0")
 panel.AddText("xm w350", "Start from the same lobby and camera position.")
 magnetSaved := 0
 try magnetSaved := IniRead(A_ScriptDir "\settings.ini", "Options", "TreatMagnet", 0)
@@ -185,8 +190,7 @@ Start() {
         SendEvent "{d down}"
         status.Text := "Status: Entering (D for 7.5 seconds)"
         SetTimer Tick, 30, 10
-        if broomCheck.Value || surviveCheck.Value
-            StartBroomWorker()
+        StartBroomWorker()
     } catch Error as e {
         Stop("Start failed: " e.Message)
     }
@@ -204,7 +208,7 @@ BroomOptionsChanged(*) {
     if broomCheck.Value || surviveCheck.Value
         StartBroomWorker()
     else {
-        StopBroomWorker()
+        ; Round and elimination OCR remains active for the run statistics.
         StopGame2Movement()
         if phase = "broom_wait" || phase = "game2" {
             phase := "return", phaseAt := A_TickCount, lobbyHits := 0
@@ -221,6 +225,7 @@ StartBroomWorker() {
     if broomPid && ProcessExist(broomPid)
         return
     try FileDelete helperDir "\broom-observation.txt"
+    try FileDelete helperDir "\stats-observation.txt"
     python := A_ScriptDir "\runtime\python\pythonw.exe"
     if !FileExist(python)
         python := EnvGet("USERPROFILE") "\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\pythonw.exe"
@@ -229,6 +234,7 @@ StartBroomWorker() {
         broomSeq := ""
         LogEvent("broom_worker_started", "pid=" broomPid)
         SetTimer BroomTick, 120, -1
+        SetTimer StatsTick, 150, -1
     } catch Error as e {
         broomPid := 0
         LogEvent("broom_worker_failed", e.Message)
@@ -239,6 +245,7 @@ StartBroomWorker() {
 StopBroomWorker() {
     global broomPid, broomBusy, broomSeq
     SetTimer BroomTick, 0
+    SetTimer StatsTick, 0
     if broomPid && ProcessExist(broomPid)
         try ProcessClose broomPid
     broomPid := 0, broomBusy := false, broomSeq := ""
@@ -279,7 +286,7 @@ Game2Tick() {
 }
 
 BroomTick() {
-    global broomSeq, broomBusy, broomUsed, roundCandidate, roundHits, eventRound, eventRoundAt, mouseAutomationBusy
+    global broomSeq, broomBusy, broomUsed, roundCandidate, roundHits, eventRound, eventRoundAt, mouseAutomationBusy, statsRound
     global phase, phaseAt, game2StartedAt, lobbyHits, game2LobbyAt
     if !running || focusPaused || !WinActive("ahk_id " hwnd) || broomBusy
         return
@@ -302,6 +309,7 @@ BroomTick() {
             if seenRound != eventRound
                 LogEvent("event_round_detected", "round=" seenRound)
             eventRound := seenRound, eventRoundAt := now
+            statsRound := seenRound
         }
     } else
         roundHits := 0
@@ -373,6 +381,66 @@ BroomTick() {
         }
     } finally {
         broomBusy := false, mouseAutomationBusy := false
+    }
+}
+
+
+UpdateStatsDisplay() {
+    extra := statsUnknownDeaths ? "   Unknown: " statsUnknownDeaths : ""
+    deathsDisplay.Text := "Deaths - R1: " statsDeaths[1] "   R2: " statsDeaths[2] "   R3: " statsDeaths[3] extra
+    suffix := statsUnverified ? " (unread: " statsUnverified ")" : ""
+    treatsDisplay.Text := "Treats earned: " statsTreats suffix
+}
+
+FinalizePreviousDeath() {
+    global statsUnverified, statsDeathLatched, statsRewardAdded, statsDeathHits, statsRound
+    global statsRewardCandidate, statsRewardHits
+    if statsDeathLatched && !statsRewardAdded {
+        statsUnverified += 1
+        LogEvent("stats_reward_unread", "round=" statsRound)
+    }
+    statsDeathLatched := false, statsRewardAdded := false, statsDeathHits := 0, statsRound := 0
+    statsRewardCandidate := -1, statsRewardHits := 0
+    UpdateStatsDisplay()
+}
+
+StatsTick() {
+    global statsSeq, statsDeathHits, statsDeathLatched, statsRewardAdded, statsTreats, statsUnknownDeaths, statsDeaths, statsRound
+    global statsRewardCandidate, statsRewardHits
+    if !running || focusPaused || !WinActive("ahk_id " hwnd)
+        return
+    data := ""
+    try data := Trim(FileRead(helperDir "\stats-observation.txt", "UTF-8"))
+    if !RegExMatch(data, "^(\d+)\|([01])\|(-?\d+)\|(\d+)$", &m) || m[1] = statsSeq
+        return
+    statsSeq := m[1], age := A_TickCount-Integer(m[4])
+    if age < 0 || age > 3000
+        return
+    if m[2] != "1" {
+        statsDeathHits := 0, statsRewardCandidate := -1, statsRewardHits := 0
+        return
+    }
+    statsDeathHits += 1
+    if statsDeathHits >= 2 && !statsDeathLatched {
+        if statsRound >= 1 && statsRound <= 3
+            statsDeaths[statsRound] += 1
+        else
+            statsUnknownDeaths += 1
+        statsDeathLatched := true, statsRewardAdded := false
+        LogEvent("stats_death", "round=" statsRound)
+        UpdateStatsDisplay()
+    }
+    value := Integer(m[3])
+    if statsDeathLatched && !statsRewardAdded && value >= 0 {
+        if value = statsRewardCandidate
+            statsRewardHits += 1
+        else
+            statsRewardCandidate := value, statsRewardHits := 1
+        if statsRewardHits >= 2 {
+            statsTreats += value, statsRewardAdded := true
+            LogEvent("stats_reward", "round=" statsRound " treats=" value)
+            UpdateStatsDisplay()
+        }
     }
 }
 
@@ -501,7 +569,7 @@ Tick() {
     global hudHits, hudMissingAt, lobbyHits, returnHits, returnLeftAt, lobbyStableAt, lastLobbyClick, lobbyClickAttempts, lobbyClickSent, lobbyCandidateAt
     global entryHits, entryAttempts, focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt, magnetUsed, gamesPlayed
     global waitingLoadingAt, transferPending, transferLobbyAt, entryLobbyAt, entrySideRetries, entryLoadingAt
-    global gameStartCandidateAt, gameVerified
+    global gameStartCandidateAt, gameVerified, statsRound, statsDeathLatched, statsRewardAdded
     if !running
         return
     PublishPhase()
@@ -694,6 +762,8 @@ Tick() {
                 lobbyClickSent := false, lobbyCandidateAt := 0
                 gameStartCandidateAt := 0
                 waitingLoadingAt := 0, transferPending := false, transferLobbyAt := 0
+                if !statsRound
+                    statsRound := 1
                 gamesPlayed += 1
                 gameCounter.Text := "Games played: " gamesPlayed
                 LogEvent("game_started", "count=" gamesPlayed " hud=" m[3] " dive_green=" m[6] " timer=" m[7] " cue=" m[2])
@@ -807,6 +877,12 @@ Tick() {
             } else
                 lobbyCandidateAt := 0
             if lobbyCandidateAt && now-lobbyCandidateAt >= 1500 {
+                ; Give the independent OCR worker a bounded chance to read
+                ; the elimination reward before leaving the screen.
+                if now-lobbyCandidateAt < 6000 && (!statsDeathLatched || !statsRewardAdded) {
+                    status.Text := "Status: Reading end-screen stats"
+                    return
+                }
                 if mouseAutomationBusy
                     return
                 if !ClickLobbyButton(m[4]) || !running || tickGeneration != runGeneration
@@ -886,10 +962,8 @@ ReconnectRoblox(replacement) {
     try {
         hwnd := replacement
         Run '"' python '" "' helperDir '\live_detector.py" ' hwnd, helperDir, "Hide", &helperPid
-        if broomCheck.Value || surviveCheck.Value {
-            StopBroomWorker()
-            StartBroomWorker()
-        }
+        StopBroomWorker()
+        StartBroomWorker()
         lastSeq := "", freshAt := A_TickCount
         if phase = "waiting"
             transferPending := true, waitingLoadingAt := 0, transferLobbyAt := 0
@@ -962,6 +1036,7 @@ MaybeResumeFromLobby(observation, now) {
     if now-lobbyStableAt < 3000
         return false
     LogEvent("lobby_confirmed", "spawn=" spawnEvidence " stable_ms=" (now-lobbyStableAt))
+    FinalizePreviousDeath()
     phase := "entry", phaseAt := now
     magnetUsed := false, entryHits := 0, entryAttempts := 0, lobbyStableAt := 0
     broomUsed := false, eventRound := 0, eventRoundAt := 0, roundCandidate := 0, roundHits := 0
