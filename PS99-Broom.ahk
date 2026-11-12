@@ -22,7 +22,7 @@ global focusPaused := false, focusPauseAt := 0, focusRetryAt := 0, focusAttempts
 global helperDir := A_ScriptDir "\masquerade", publishedPhase := ""
 global magnetPid := 0, magnetBusy := false, magnetLastClick := 0, magnetSeq := "", magnetUsed := false
 global broomPid := 0, broomBusy := false, broomUsed := false, broomSeq := "", mouseAutomationBusy := false
-global roundCandidate := 0, roundHits := 0, eventRound := 0, eventRoundAt := 0
+global roundCandidate := 0, roundHits := 0, eventRound := 0, eventRoundAt := 0, broomArmed := false
 global game2StartedAt := 0, game2Direction := "", game2MoveAt := 0, game2JumpAt := 0, game2LobbyAt := 0
 OnExit Cleanup
 
@@ -145,11 +145,11 @@ Start() {
     global lastCue, lastCueAt, hudHits, hudMissingAt, lobbyHits, returnHits, returnLeftAt, lobbyStableAt, lastLobbyClick, lobbyClickAttempts, lobbyClickSent, lobbyCandidateAt
     global focusPaused, focusPauseAt, focusRetryAt, focusAttempts, focusActiveAt, publishedPhase, magnetUsed
     global waitingLoadingAt, transferPending, transferLobbyAt, entryLobbyAt, entrySideRetries, entryLoadingAt
-    global gameStartCandidateAt, gameVerified, broomUsed, eventRound, eventRoundAt, roundCandidate, roundHits, game2LobbyAt
+    global gameStartCandidateAt, gameVerified, broomUsed, eventRound, eventRoundAt, roundCandidate, roundHits, game2LobbyAt, broomArmed
     magnetUsed := false, waitingLoadingAt := 0, transferPending := false, transferLobbyAt := 0
     entryLobbyAt := 0, entrySideRetries := 0, entryLoadingAt := 0
     gameStartCandidateAt := 0, gameVerified := false
-    broomUsed := false, eventRound := 0, eventRoundAt := 0, roundCandidate := 0, roundHits := 0, game2LobbyAt := 0
+    broomUsed := false, eventRound := 0, eventRoundAt := 0, roundCandidate := 0, roundHits := 0, game2LobbyAt := 0, broomArmed := false
     hwnd := WinExist("ahk_exe RobloxPlayerBeta.exe")
     python := A_ScriptDir "\runtime\python\pythonw.exe"
     if !FileExist(python)
@@ -287,7 +287,7 @@ Game2Tick() {
 
 BroomTick() {
     global broomSeq, broomBusy, broomUsed, roundCandidate, roundHits, eventRound, eventRoundAt, mouseAutomationBusy, statsRound
-    global phase, phaseAt, game2StartedAt, lobbyHits, game2LobbyAt
+    global phase, phaseAt, game2StartedAt, lobbyHits, game2LobbyAt, broomArmed
     if !running || focusPaused || !WinActive("ahk_id " hwnd) || broomBusy
         return
     if phase != "waiting" && phase != "game" && phase != "game2" && phase != "broom_wait"
@@ -313,13 +313,20 @@ BroomTick() {
         }
     } else
         roundHits := 0
-    if !eventRound || now-eventRoundAt > 12000
+    if !eventRound
         return
     ; Both power-ups may be ready before game 1 begins. Start each detector
     ; independently, and serialize only the actual mouse interaction.
     if eventRound = 1 && magnetCheck.Value && !magnetUsed && (phase = "waiting" || phase = "game" && now-phaseAt <= 30000)
         StartMagnet()
     after := broomAfter.Value-1
+    ; Arm at the round transition, and keep it armed while the button appears.
+    if after = 0 && eventRound = 1
+        broomArmed := true
+    else if after > 0 && eventRound >= after+1
+        broomArmed := true
+    else if after = 1 && phase = "broom_wait" && eventRound = 1
+        broomArmed := true
     keepGame2 := surviveCheck.Value || (broomCheck.Value && after = 2 && !broomUsed)
     if eventRound = 2 && keepGame2 && (phase = "game" || phase = "broom_wait") {
         phase := "game2", phaseAt := now, game2StartedAt := now, game2LobbyAt := 0
@@ -340,7 +347,7 @@ BroomTick() {
         status.Text := "Status: Looking for Lobby button"
         return
     }
-    if !broomCheck.Value || broomUsed || mouseAutomationBusy || eventRound != after+1 || A_TickCount < clickGuardRetryAt
+    if !broomCheck.Value || broomUsed || mouseAutomationBusy || !broomArmed || A_TickCount < clickGuardRetryAt
         return
     if after = 0 && phase != "waiting" && phase != "game"
         return
@@ -369,7 +376,7 @@ BroomTick() {
         if !RegExMatch(latest, "^(\d+)\|([0-3])\|(-?\d+)\|(-?\d+)\|(\d+)$", &check)
             return
         latestAge := A_TickCount-Integer(check[5])
-        if latestAge < 0 || latestAge > 2000 || (Integer(check[2]) != 0 && Integer(check[2]) != after+1) || eventRound != after+1 || A_TickCount-eventRoundAt > 12000 || Abs(Integer(check[3])-x)>10 || Abs(Integer(check[4])-y)>10
+        if latestAge < 0 || latestAge > 2000 || !broomArmed || Abs(Integer(check[3])-x)>10 || Abs(Integer(check[4])-y)>10
             return
         MouseGetPos &actualX, &actualY
         if Abs(actualX-x)>3 || Abs(actualY-y)>3 {
@@ -1043,7 +1050,7 @@ MaybeRecoverServerTransfer(observation, now, hud) {
 
 MaybeResumeFromLobby(observation, now) {
     global phase, phaseAt, returnLeftAt, lobbyStableAt, entryHits, entryAttempts, magnetUsed, entryLobbyAt, entrySideRetries
-    global broomUsed, eventRound, eventRoundAt, roundCandidate, roundHits
+    global broomUsed, eventRound, eventRoundAt, roundCandidate, roundHits, broomArmed
     red := Integer(observation[4])
     topPurple := Integer(observation[5])
     spawnEvidence := Integer(observation[12]) = 1
@@ -1068,7 +1075,7 @@ MaybeResumeFromLobby(observation, now) {
     FinalizePreviousDeath()
     phase := "entry", phaseAt := now
     magnetUsed := false, entryHits := 0, entryAttempts := 0, lobbyStableAt := 0
-    broomUsed := false, eventRound := 0, eventRoundAt := 0, roundCandidate := 0, roundHits := 0
+    broomUsed := false, eventRound := 0, eventRoundAt := 0, roundCandidate := 0, roundHits := 0, broomArmed := false
     entryLobbyAt := 0, entrySideRetries := 0
     SendEvent "{d down}"
     status.Text := "Status: Entering again (D for 7.5 seconds)"
