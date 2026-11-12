@@ -81,7 +81,7 @@ def _runs(mask, gap=2):
     return [(int(a[0]),int(a[-1])+1) for a in np.split(indices,cuts)]
 
 
-def find_ready_magnet(image, include_box=False):
+def find_ready_magnet(image, include_box=False, all_candidates=False):
     """Find a ready Treat Magnet using the right-side button and label colors.
 
     Return normalized frame coordinates, or None. A Ready label, cyan button,
@@ -98,6 +98,7 @@ def find_ready_magnet(image, include_box=False):
     # across its icon. Generic dark purple backgrounds are not sufficient.
     magenta=(r>80)&(b>90)&(r>g*1.6)&(b>g*1.6)
     broom=find_ready_broom(image,include_box=True)
+    candidates=[]
     for y0,y1 in _runs(cyan.sum(axis=1)>=8):
         if not 12 <= y1-y0 <= 100:
             continue
@@ -122,8 +123,10 @@ def find_ready_magnet(image, include_box=False):
             # consume the first matching candidate if it is the broom itself.
             if broom and broom[2]<=cx<=broom[4] and broom[3]<=cy<=broom[5]:
                 continue
-            return (cx,cy,xbase+x0,y0,xbase+x1,y1) if include_box else (cx,cy)
-    return None
+            candidates.append((cx,cy,xbase+x0,y0,xbase+x1,y1))
+    if all_candidates:
+        return candidates
+    return (candidates[0] if include_box else candidates[0][:2]) if candidates else None
 
 
 # Shape sample from the provided broomstick button. It only describes the
@@ -134,7 +137,7 @@ _BROOM_REGION=np.zeros((24,24),dtype=bool)
 _BROOM_REGION[2:19,2:22]=True
 
 
-def find_ready_broom(image, include_box=False):
+def find_ready_broom(image, include_box=False, all_candidates=False):
     """Locate the ready broom, distinguishing it from adjacent power-ups."""
     frame=image.convert('RGB').resize((960,515))
     a=np.asarray(frame,dtype=np.int16)
@@ -160,10 +163,10 @@ def find_ready_broom(image, include_box=False):
             score=2*int((dark&_BROOM_SHAPE).sum())/(int(dark.sum())+int(_BROOM_SHAPE.sum())+1)
             if score>=.43:
                 candidates.append((score,xbase+(x0+x1)//2,(y0+y1)//2,xbase+x0,y0,xbase+x1,y1))
-    if not candidates:
-        return None
     candidates.sort(reverse=True)
-    if len(candidates)>1 and candidates[0][0]-candidates[1][0]<.10:
+    if all_candidates:
+        return [candidate[1:] for candidate in candidates]
+    if not candidates or (len(candidates)>1 and candidates[0][0]-candidates[1][0]<.10):
         return None
     return candidates[0][1:] if include_box else candidates[0][1:3]
 
@@ -238,8 +241,7 @@ def magnet_worker():
                 rect=wintypes.RECT()
                 if user.GetForegroundWindow()==hwnd and user.GetWindowRect(hwnd,ctypes.byref(rect)):
                     im=ImageGrab.grab(bbox=(rect.left,rect.top,rect.right,rect.bottom),include_layered_windows=False,all_screens=True).convert('RGB')
-                    pos=find_ready_magnet(im,include_box=True)
-                    if pos:
+                    for pos in find_ready_magnet(im,all_candidates=True):
                         cx,cy,x0,y0,x1,y1=pos; w,h=im.size
                         pad=round((x1-x0)*.8)
                         label=im.crop((max(0,round((x0-pad)*w/960)),max(0,round((y1-2)*h/515)),
@@ -255,6 +257,7 @@ def magnet_worker():
                             if confirmed:
                                 x=rect.left+round(cx*(rect.right-rect.left)/960)
                                 y=rect.top+round(cy*(rect.bottom-rect.top)/515)
+                                break
                 timestamp=ctypes.windll.kernel32.GetTickCount()
                 temporary.write_text(f'{seq}|{x}|{y}|{timestamp}',encoding='ascii')
                 try: os.replace(temporary,output)
@@ -372,8 +375,8 @@ def broom_worker():
                         round_no=parse_event_round(response)
                         if response.startswith('ERROR'):
                             report('ocr_error',error=response.strip())
-                    pos=find_ready_broom(im,include_box=True) if current_phase not in ('return','returning') else None
-                    if pos:
+                    positions=find_ready_broom(im,all_candidates=True) if current_phase not in ('return','returning') else []
+                    for pos in positions:
                         cx,cy,x0,y0,x1,y1=pos
                         pad=round((x1-x0)*.8)
                         xlo=max(0,round((x0-pad)*w/960));xhi=min(w,round((x1+pad)*w/960))
@@ -388,6 +391,7 @@ def broom_worker():
                             if re.search(r'\bBROOM\s*STICK\b',label_text):
                                 x=rect.left+round(cx*(rect.right-rect.left)/960)
                                 y=rect.top+round(cy*(rect.bottom-rect.top)/515)
+                                break
                     # The lobby button can appear even when the pink heading is dim,
                     # occluded, or rendered differently on another display. Use it to
                     # trigger OCR, then require the elimination heading before counting.

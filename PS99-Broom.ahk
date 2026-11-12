@@ -313,7 +313,7 @@ BroomTick() {
         }
     } else
         roundHits := 0
-    if !eventRound || now-eventRoundAt > 3000
+    if !eventRound || now-eventRoundAt > 12000
         return
     ; Both power-ups may be ready before game 1 begins. Start each detector
     ; independently, and serialize only the actual mouse interaction.
@@ -369,7 +369,7 @@ BroomTick() {
         if !RegExMatch(latest, "^(\d+)\|([0-3])\|(-?\d+)\|(-?\d+)\|(\d+)$", &check)
             return
         latestAge := A_TickCount-Integer(check[5])
-        if latestAge < 0 || latestAge > 2000 || Integer(check[2]) != after+1 || Abs(Integer(check[3])-x)>10 || Abs(Integer(check[4])-y)>10
+        if latestAge < 0 || latestAge > 2000 || (Integer(check[2]) != 0 && Integer(check[2]) != after+1) || eventRound != after+1 || A_TickCount-eventRoundAt > 12000 || Abs(Integer(check[3])-x)>10 || Abs(Integer(check[4])-y)>10
             return
         MouseGetPos &actualX, &actualY
         if Abs(actualX-x)>3 || Abs(actualY-y)>3 {
