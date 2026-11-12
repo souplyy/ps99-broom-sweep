@@ -81,14 +81,14 @@ def _runs(mask, gap=2):
     return [(int(a[0]),int(a[-1])+1) for a in np.split(indices,cuts)]
 
 
-def find_ready_magnet(image):
+def find_ready_magnet(image, include_box=False):
     """Find a ready Treat Magnet using the right-side button and label colors.
 
     Return normalized frame coordinates, or None. A Ready label, cyan button,
     purple icon and gold detail must all be present near one another.
     """
     a=np.asarray(image.convert('RGB').resize((960,515)),dtype=np.int16)
-    xbase=640
+    xbase=825
     r,g,b=(a[:,xbase:,i] for i in range(3))
     cyan=(r<165)&(g>115)&(b>115)&(g-r>24)&(b-r>20)
     green=(g>120)&(g-r>45)&(g-b>28)
@@ -122,7 +122,7 @@ def find_ready_magnet(image):
             # consume the first matching candidate if it is the broom itself.
             if broom and broom[2]<=cx<=broom[4] and broom[3]<=cy<=broom[5]:
                 continue
-            return (cx,cy)
+            return (cx,cy,xbase+x0,y0,xbase+x1,y1) if include_box else (cx,cy)
     return None
 
 
@@ -138,7 +138,7 @@ def find_ready_broom(image, include_box=False):
     """Locate the ready broom, distinguishing it from adjacent power-ups."""
     frame=image.convert('RGB').resize((960,515))
     a=np.asarray(frame,dtype=np.int16)
-    xbase=640
+    xbase=825
     r,g,b=(a[:,xbase:,i] for i in range(3))
     cyan=(r<165)&(g>150)&(b>150)&(g-r>30)&(b-r>25)
     green=(g>155)&(g-r>55)&(g-b>35)
@@ -158,7 +158,7 @@ def find_ready_broom(image, include_box=False):
             patch=frame.crop((xbase+x0,y0,xbase+x1,y1)).resize((24,24))
             dark=(np.asarray(patch).max(axis=2)<105)&_BROOM_REGION
             score=2*int((dark&_BROOM_SHAPE).sum())/(int(dark.sum())+int(_BROOM_SHAPE.sum())+1)
-            if score>=.55:
+            if score>=.43:
                 candidates.append((score,xbase+(x0+x1)//2,(y0+y1)//2,xbase+x0,y0,xbase+x1,y1))
     if not candidates:
         return None
@@ -220,28 +220,54 @@ def magnet_worker():
     user.GetWindowRect.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.RECT)]
     ctypes.windll.kernel32.GetTickCount.restype=wintypes.DWORD
     output=ROOT/'magnet-observation.txt'; temporary=ROOT/'magnet-observation.tmp'
-    stop=ROOT/'stop.request'; seq=0
-    while not stop.exists():
-        seq+=1
+    debug=ROOT/('magnet-detector-'+datetime.now().strftime('%Y%m%d-%H%M%S')+'.jsonl')
+    stop=ROOT/'stop.request'; seq=0; proc=None; label_path=ROOT/('magnet-label-'+str(os.getpid())+'.png')
+    def report(event,**details):
         try:
-            rect=wintypes.RECT()
-            if user.GetForegroundWindow()==hwnd and user.GetWindowRect(hwnd,ctypes.byref(rect)):
-                im=ImageGrab.grab(bbox=(rect.left,rect.top,rect.right,rect.bottom),include_layered_windows=False,all_screens=True)
-                pos=find_ready_magnet(im)
-                if pos:
-                    x=rect.left+round(pos[0]*(rect.right-rect.left)/960)
-                    y=rect.top+round(pos[1]*(rect.bottom-rect.top)/515)
-                else:
-                    x=y=0
-            else:
-                x=y=0
-            timestamp=ctypes.windll.kernel32.GetTickCount()
-            temporary.write_text(f'{seq}|{x}|{y}|{timestamp}',encoding='ascii')
-            try: os.replace(temporary,output)
-            except PermissionError: pass
-        except Exception:
-            pass
-        time.sleep(.4)
+            with debug.open('a',encoding='utf8') as f:
+                f.write(json.dumps({'time':round(time.monotonic(),3),'event':event,**details})+'\n')
+        except OSError: pass
+    try:
+        encoded=base64.b64encode(_OCR_SCRIPT.encode('utf-16le')).decode('ascii')
+        proc=subprocess.Popen(['powershell.exe','-NoProfile','-NonInteractive','-EncodedCommand',encoded],
+            stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+            text=True,encoding='utf8',errors='replace',bufsize=1,creationflags=0x08000000)
+        while not stop.exists():
+            seq+=1; x=y=0
+            try:
+                rect=wintypes.RECT()
+                if user.GetForegroundWindow()==hwnd and user.GetWindowRect(hwnd,ctypes.byref(rect)):
+                    im=ImageGrab.grab(bbox=(rect.left,rect.top,rect.right,rect.bottom),include_layered_windows=False,all_screens=True).convert('RGB')
+                    pos=find_ready_magnet(im,include_box=True)
+                    if pos:
+                        cx,cy,x0,y0,x1,y1=pos; w,h=im.size
+                        pad=round((x1-x0)*.8)
+                        label=im.crop((max(0,round((x0-pad)*w/960)),max(0,round((y1-2)*h/515)),
+                                       min(w,round((x1+pad)*w/960)),min(h,round((y1+(y1-y0)*.95)*h/515))))
+                        if label.width and label.height:
+                            label=label.resize((max(450,label.width),round(label.height*max(450,label.width)/label.width)))
+                            label.save(label_path)
+                            proc.stdin.write(str(label_path)+'\n');proc.stdin.flush()
+                            text=proc.stdout.readline().strip().upper()
+                            compact=re.sub(r'[^A-Z]','',text.replace('0','O').replace('1','I'))
+                            confirmed='TREATMAGNET' in compact
+                            report('candidate',x=cx,y=cy,label=text,confirmed=confirmed)
+                            if confirmed:
+                                x=rect.left+round(cx*(rect.right-rect.left)/960)
+                                y=rect.top+round(cy*(rect.bottom-rect.top)/515)
+                timestamp=ctypes.windll.kernel32.GetTickCount()
+                temporary.write_text(f'{seq}|{x}|{y}|{timestamp}',encoding='ascii')
+                try: os.replace(temporary,output)
+                except PermissionError: pass
+            except Exception as exc:
+                report('error',error=repr(exc))
+            time.sleep(.3)
+    finally:
+        if proc:
+            try:proc.stdin.close();proc.terminate()
+            except Exception:pass
+        try:label_path.unlink(missing_ok=True)
+        except OSError:pass
 
 
 _OCR_SCRIPT='Add-Type -AssemblyName System.Runtime.WindowsRuntime\n[Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime] | Out-Null\n[Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime] | Out-Null\n[Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType = WindowsRuntime] | Out-Null\n$script:AsTaskOp = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq \'AsTask\' -and $_.IsGenericMethod -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq \'IAsyncOperation`1\' } | Select-Object -First 1)\nfunction AwaitOp($op, $type) {\n    $task = $script:AsTaskOp.MakeGenericMethod($type).Invoke($null,@($op))\n    $task.Wait()\n    $task.Result\n}\n$engine=[Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()\nwhile ($null -ne ($line=[Console]::ReadLine())) {\n    try {\n        $file=AwaitOp ([Windows.Storage.StorageFile]::GetFileFromPathAsync($line)) ([Windows.Storage.StorageFile])\n        $stream=AwaitOp ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])\n        $decoder=AwaitOp ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])\n        $bitmap=AwaitOp ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])\n        $result=AwaitOp ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])\n        $text=$result.Text -replace "[\\r\\n|]",\' \'\n        $bitmap.Dispose();$stream.Dispose()\n        [Console]::WriteLine($text)\n    } catch { [Console]::WriteLine(\'ERROR \'+$_.Exception.Message) }\n}\n'
@@ -358,6 +384,7 @@ def broom_worker():
                             label.save(label_path)
                             proc.stdin.write(str(label_path)+'\n');proc.stdin.flush()
                             label_text=proc.stdout.readline().upper().replace('0','O').replace('1','I').replace('5','S')
+                            report('broom_candidate', x=cx, y=cy, label=label_text.strip())
                             if re.search(r'\bBROOM\s*STICK\b',label_text):
                                 x=rect.left+round(cx*(rect.right-rect.left)/960)
                                 y=rect.top+round(cy*(rect.bottom-rect.top)/515)
